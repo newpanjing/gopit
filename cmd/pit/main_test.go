@@ -55,3 +55,14 @@ func TestDefaultServerConfigPath(t *testing.T) {
 		t.Fatalf("defaultServerConfigPath() = %q, want %q", got, want)
 	}
 }
+
+// TestReleaseTagFromPath 验证 API 限流时可从 GitHub 页面重定向路径识别版本。
+func TestReleaseTagFromPath(t *testing.T) {
+	tag, ok := releaseTagFromPath("/newpanjing/gopit/releases/tag/v1.2.12")
+	if !ok || tag != "v1.2.12" {
+		t.Fatalf("releaseTagFromPath() = (%q, %t), want (v1.2.12, true)", tag, ok)
+	}
+	if _, ok := releaseTagFromPath("/newpanjing/gopit/releases/latest"); ok {
+		t.Fatal("latest redirect path unexpectedly parsed as a release tag")
+	}
+}

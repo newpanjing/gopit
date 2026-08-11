@@ -615,7 +615,10 @@ func cmdUpgrade(args []string) {
 	restartAfterUpgrade()
 }
 
-const latestReleaseAPI = "https://api.github.com/repos/newpanjing/gopit/releases/latest"
+const (
+	latestReleaseAPI  = "https://api.github.com/repos/newpanjing/gopit/releases/latest"
+	latestReleasePage = "https://github.com/newpanjing/gopit/releases/latest"
+)
 
 // releaseInfo 仅保留升级检查所需的 GitHub Release 字段。
 type releaseInfo struct {
@@ -670,6 +673,19 @@ func formatDownloadBytes(value int64) string {
 
 // fetchLatestReleaseVersion 查询 GitHub 最新发布标签。
 func fetchLatestReleaseVersion() (string, error) {
+	version, apiErr := fetchLatestReleaseVersionFromAPI()
+	if apiErr == nil {
+		return version, nil
+	}
+	version, pageErr := fetchLatestReleaseVersionFromPage()
+	if pageErr == nil {
+		return version, nil
+	}
+	return "", fmt.Errorf("GitHub API 查询失败: %v；网页回退失败: %w", apiErr, pageErr)
+}
+
+// fetchLatestReleaseVersionFromAPI 通过 GitHub API 查询最新发布标签。
+func fetchLatestReleaseVersionFromAPI() (string, error) {
 	request, err := http.NewRequest(http.MethodGet, latestReleaseAPI, nil)
 	if err != nil {
 		return "", err
@@ -692,6 +708,37 @@ func fetchLatestReleaseVersion() (string, error) {
 		return "", fmt.Errorf("latest release has no tag")
 	}
 	return release.TagName, nil
+}
+
+// fetchLatestReleaseVersionFromPage 在 API 被限流时通过 Release 页重定向获取标签。
+func fetchLatestReleaseVersionFromPage() (string, error) {
+	request, err := http.NewRequest(http.MethodGet, latestReleasePage, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("User-Agent", "gopit-upgrade")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("GitHub Release page returned HTTP %s", response.Status)
+	}
+	if version, ok := releaseTagFromPath(response.Request.URL.Path); ok {
+		return version, nil
+	}
+	return "", fmt.Errorf("cannot resolve release tag from %s", response.Request.URL.Path)
+}
+
+// releaseTagFromPath 从 GitHub Release 页面路径提取发布标签。
+func releaseTagFromPath(path string) (string, bool) {
+	const tagPathPrefix = "/newpanjing/gopit/releases/tag/"
+	if !strings.HasPrefix(path, tagPathPrefix) {
+		return "", false
+	}
+	tag := strings.TrimPrefix(path, tagPathPrefix)
+	return tag, tag != ""
 }
 
 // compareVersions 比较 vMAJOR.MINOR.PATCH 格式版本，返回最新版本相对当前版本的大小。
