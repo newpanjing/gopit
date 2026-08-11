@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"gopit/internal/config"
 	"gopit/internal/runtime"
 )
 
@@ -94,6 +95,30 @@ func TestEnsureClientConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("client config was not created: %v", err)
+	}
+}
+
+// TestAddClientTunnel 验证命令行添加的隧道会持久化，并拒绝重复的服务端与 Token 组合。
+func TestAddClientTunnel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	server := "43.128.61.60:7001"
+	token := "example-token"
+
+	if err := addClientTunnel(path, server, token); err != nil {
+		t.Fatalf("addClientTunnel() error = %v", err)
+	}
+	cfg, err := config.LoadClientConfig(path)
+	if err != nil {
+		t.Fatalf("load client config: %v", err)
+	}
+	if len(cfg.Tunnels) != 1 {
+		t.Fatalf("tunnel count = %d, want 1", len(cfg.Tunnels))
+	}
+	if got := cfg.Tunnels[0]; got.Server != server || got.Token != token || !got.Enabled || got.ID == "" {
+		t.Fatalf("stored tunnel = %#v, want enabled tunnel for %s", got, server)
+	}
+	if err := addClientTunnel(path, server, token); err == nil {
+		t.Fatal("duplicate tunnel was accepted")
 	}
 }
 

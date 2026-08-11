@@ -17,6 +17,16 @@ import (
 
 const refreshInterval = time.Second
 
+const (
+	clientMarkerWidth  = 2
+	clientNameWidth    = 18
+	clientForwardWidth = 22
+	clientServerWidth  = 22
+	clientEnabledWidth = 9
+	clientStatusWidth  = 12
+	clientStreamsWidth = 8
+)
+
 type tickMsg time.Time
 
 // Model 是附加到客户端后台管理器的终端界面。
@@ -143,26 +153,27 @@ func (m *Model) refresh() {
 
 func (m *Model) renderTunnels() string {
 	rows := make([]string, 0, len(m.snapshot.Tunnels)+1)
-	rows = append(rows, clientTableHeaderStyle.Render(fmt.Sprintf("%-18s %-22s %-22s %-9s %-12s %-8s %s", "Name", "Forward", "Server", "Enabled", "Status", "Streams", "Rate")))
+	rows = append(rows, clientTableHeaderStyle.Render(renderTunnelRow("", "Name", "Forward", "Server", "Enabled", "Status", "Streams", "Rate")))
 	for index, item := range m.snapshot.Tunnels {
 		name := item.Name
 		if name == "" {
 			name = "-"
 		}
 		rate := fmt.Sprintf("↑%s/s ↓%s/s", bytes(item.SendRate), bytes(item.RecvRate))
-		enabled := clientDisabledStyle.Render("disabled")
+		enabled := clientDisabledStyle.Render(fixedClientCell("disabled", clientEnabledWidth))
 		if item.Enabled {
-			enabled = clientEnabledStyle.Render("enabled")
+			enabled = clientEnabledStyle.Render(fixedClientCell("enabled", clientEnabledWidth))
 		}
 		target := item.Status.Target
 		if target == "" {
 			target = "-"
 		}
-		line := fmt.Sprintf("%-18s %-22s %-22s %-9s %-12s %-8d %s", trim(name, 18), trim(target, 22), trim(item.Server, 22), enabled, renderConnectionStatus(item.Status.Status), item.Status.ActiveStreams, clientRateStyle.Render(rate))
+		status := renderConnectionStatus(fixedClientCell(item.Status.Status, clientStatusWidth))
+		line := renderTunnelRow("", trim(name, clientNameWidth), trim(target, clientForwardWidth), trim(item.Server, clientServerWidth), enabled, status, fmt.Sprintf("%d", item.Status.ActiveStreams), clientRateStyle.Render(rate))
 		if index == m.cursor {
-			line = clientSelectedRowStyle.Render("▸ " + line)
+			line = clientSelectedRowStyle.Render(renderTunnelRow("▸", line))
 		} else {
-			line = "  " + line
+			line = renderTunnelRow("", line)
 		}
 		rows = append(rows, line)
 	}
@@ -170,6 +181,33 @@ func (m *Model) renderTunnels() string {
 		rows = append(rows, clientMutedStyle.Render("暂无隧道。使用 pit join <token> -s <server> 添加。"))
 	}
 	return clientBox("隧道 / Tunnels", strings.Join(rows, "\n"))
+}
+
+// renderTunnelRow 使用固定列宽拼接客户端隧道表格，避免 ANSI 颜色码干扰 fmt 的对齐计算。
+func renderTunnelRow(marker string, values ...string) string {
+	if len(values) == 1 {
+		return fixedClientCell(marker, clientMarkerWidth) + values[0]
+	}
+	widths := []int{clientNameWidth, clientForwardWidth, clientServerWidth, clientEnabledWidth, clientStatusWidth, clientStreamsWidth}
+	parts := make([]string, 0, len(values)+1)
+	parts = append(parts, fixedClientCell(marker, clientMarkerWidth))
+	for index, value := range values {
+		if index < len(widths) {
+			parts = append(parts, fixedClientCell(value, widths[index]))
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, " ")
+}
+
+// fixedClientCell 按终端显示宽度补齐单元格，调用方应在着色前完成补齐。
+func fixedClientCell(value string, width int) string {
+	padding := width - lipgloss.Width(value)
+	if padding <= 0 {
+		return value
+	}
+	return value + strings.Repeat(" ", padding)
 }
 
 func (m *Model) renderStatus() string {

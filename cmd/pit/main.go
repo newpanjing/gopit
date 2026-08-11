@@ -1071,11 +1071,6 @@ func cmdJoin(args []string) {
 		fmt.Fprintln(os.Stderr, "加入失败: 服务端 start 模式正在运行，请先执行 pit stop")
 		os.Exit(1)
 	}
-	if isClientRunning(configPath) && !foreground {
-		pid, _ := readPID(configPath)
-		fmt.Fprintf(os.Stderr, "客户端已运行 (PID %d)，使用 pit tui 管理\n", pid)
-		os.Exit(1)
-	}
 	if runOnly {
 		if _, err := config.LoadClientConfig(configPath); err != nil {
 			fmt.Fprintf(os.Stderr, "加载客户端配置失败: %v\n", err)
@@ -1113,6 +1108,11 @@ func cmdJoin(args []string) {
 	if err := saveRuntimeState(runtime.ModeClient, configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "保存运行模式失败: %v\n", err)
 		os.Exit(1)
+	}
+	if isClientRunning(configPath) {
+		pid, _ := readPID(configPath)
+		fmt.Printf("隧道已添加，客户端正在加载配置 (PID %d)\n", pid)
+		return
 	}
 
 	if !foreground {
