@@ -14,13 +14,10 @@ func Validate(cfg *config.ServerConfig) error {
 		return fmt.Errorf("server.tunnel_listen is required")
 	}
 
-	// 连接 ID 唯一性 + 端口唯一性
+	// 连接 ID 唯一性 + TCP 监听端口唯一性
 	connIDs := make(map[string]bool)
-	type portBinding struct {
-		connType string
-		port     int
-	}
-	ports := make(map[portBinding]bool)
+	tcpPorts := make(map[int]bool)
+	udpPorts := make(map[int]bool)
 	for i, c := range cfg.Connections {
 		if c.ID == "" {
 			return fmt.Errorf("connections[%d].id is required", i)
@@ -47,13 +44,28 @@ func Validate(cfg *config.ServerConfig) error {
 			if c.ListenPort < 1 || c.ListenPort > 65535 {
 				return fmt.Errorf("connection %s: listen_port out of range (1-65535)", c.ID)
 			}
-			binding := portBinding{connType: connType, port: c.ListenPort}
-			if ports[binding] {
+			if connType == config.ConnectionTypeTCP && tcpPorts[c.ListenPort] {
+				return fmt.Errorf("duplicate tcp listen_port: %d", c.ListenPort)
+			}
+			if connType == config.ConnectionTypeUDP && udpPorts[c.ListenPort] {
 				return fmt.Errorf("duplicate %s listen_port: %d", connType, c.ListenPort)
 			}
-			ports[binding] = true
+			if connType == config.ConnectionTypeTCP {
+				tcpPorts[c.ListenPort] = true
+			} else {
+				udpPorts[c.ListenPort] = true
+			}
 		}
-		// http 类型: listen_port 可为 0，host 可为空
+		if connType == config.ConnectionTypeHTTP && c.ListenPort > 0 {
+			if c.ListenPort > 65535 {
+				return fmt.Errorf("connection %s: listen_port out of range (1-65535)", c.ID)
+			}
+			if tcpPorts[c.ListenPort] {
+				return fmt.Errorf("duplicate tcp/http listen_port: %d", c.ListenPort)
+			}
+			tcpPorts[c.ListenPort] = true
+		}
+		// HTTP 类型: listen_port 为 0 时使用全局 Web 端口，Host 可为空。
 
 		if c.Target == "" {
 			return fmt.Errorf("connection %s: target is required", c.ID)

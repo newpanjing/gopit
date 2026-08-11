@@ -30,17 +30,21 @@ type Model struct {
 	errMsg       string
 	width        int
 	modeSwitcher func() error
+	appVersion   string
 }
 
 // NewAttached 创建客户端附加式 TUI。
 func NewAttached(configPath string, logger *slog.Logger) *Model {
 	return &Model{configPath: configPath, logger: logger, loader: func() (manager.Snapshot, error) {
 		return clientmanagement.ReadSnapshot(clientmanagement.SocketPath(configPath))
-	}, width: 90}
+	}, width: 90, appVersion: "dev"}
 }
 
 // SetModeSwitcher 设置切换到服务端模式的持久化回调。
 func (m *Model) SetModeSwitcher(switcher func() error) { m.modeSwitcher = switcher }
+
+// SetVersion 设置显示在客户端界面标题中的程序版本。
+func (m *Model) SetVersion(value string) { m.appVersion = value }
 
 func (m *Model) Init() tea.Cmd { return m.refreshCmd() }
 
@@ -107,8 +111,8 @@ func (m *Model) View() string {
 	if m.width == 0 {
 		m.width = 90
 	}
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("◉ GoPit Client")
-	nav := "  1:隧道    2:状态    3:事件"
+	header := clientTitleStyle.Render("◉ GoPit Client") + clientVersionStyle.Render("v"+m.appVersion)
+	nav := m.renderNavigation()
 	var content string
 	switch m.page {
 	case 0:
@@ -119,7 +123,7 @@ func (m *Model) View() string {
 		content = m.renderEvents()
 	}
 	if m.errMsg != "" {
-		content += "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("⚠ "+m.errMsg)
+		content += "\n" + clientErrorStyle.Render("⚠ "+m.errMsg)
 	}
 	return header + "\n" + nav + "\n\n" + content + "\n\n" + m.help()
 }
@@ -138,23 +142,30 @@ func (m *Model) refresh() {
 }
 
 func (m *Model) renderTunnels() string {
-	lines := []string{"隧道 / Tunnels", "  Name                 Server                   Enabled  Status       Streams  Rate"}
+	rows := make([]string, 0, len(m.snapshot.Tunnels)+1)
+	rows = append(rows, clientTableHeaderStyle.Render(fmt.Sprintf("%-20s %-24s %-9s %-12s %-8s %s", "Name", "Server", "Enabled", "Status", "Streams", "Rate")))
 	for index, item := range m.snapshot.Tunnels {
-		marker := " "
-		if index == m.cursor {
-			marker = "▸"
-		}
 		name := item.Name
 		if name == "" {
 			name = item.ID
 		}
 		rate := fmt.Sprintf("↑%s/s ↓%s/s", bytes(item.SendRate), bytes(item.RecvRate))
-		lines = append(lines, fmt.Sprintf("%s %-20s %-24s %-8t %-12s %-8d %s", marker, trim(name, 20), trim(item.Server, 24), item.Enabled, item.Status.Status, item.Status.ActiveStreams, rate))
+		enabled := clientDisabledStyle.Render("disabled")
+		if item.Enabled {
+			enabled = clientEnabledStyle.Render("enabled")
+		}
+		line := fmt.Sprintf("%-20s %-24s %-9s %-12s %-8d %s", trim(name, 20), trim(item.Server, 24), enabled, renderConnectionStatus(item.Status.Status), item.Status.ActiveStreams, clientRateStyle.Render(rate))
+		if index == m.cursor {
+			line = clientSelectedRowStyle.Render("▸ " + line)
+		} else {
+			line = "  " + line
+		}
+		rows = append(rows, line)
 	}
 	if len(m.snapshot.Tunnels) == 0 {
-		lines = append(lines, "  暂无隧道。使用 pit join <token> -s <server> 添加。")
+		rows = append(rows, clientMutedStyle.Render("暂无隧道。使用 pit join <token> -s <server> 添加。"))
 	}
-	return box(strings.Join(lines, "\n"))
+	return clientBox("隧道 / Tunnels", strings.Join(rows, "\n"))
 }
 
 func (m *Model) renderStatus() string {
@@ -169,18 +180,64 @@ func (m *Model) renderStatus() string {
 		sent += item.Status.BytesSent
 		received += item.Status.BytesReceived
 	}
-	return box(fmt.Sprintf("状态 / Status\n\nOnline Tunnels    %d\nActive Streams    %d\nBytes Sent        %s\nBytes Received    %s", connected, streams, bytes(sent), bytes(received)))
+	content := fmt.Sprintf("Online Tunnels    %s\nActive Streams    %s\nBytes Sent        %s\nBytes Received    %s",
+		clientMetricStyle.Render(fmt.Sprintf("%d", connected)),
+		clientMetricStyle.Render(fmt.Sprintf("%d", streams)),
+		clientMetricStyle.Render(bytes(sent)),
+		clientMetricStyle.Render(bytes(received)),
+	)
+	return clientBox("状态 / Status", content)
 }
 
 func (m *Model) renderEvents() string {
-	lines := []string{"事件 / Events"}
+	lines := make([]string, 0, len(m.snapshot.Events))
 	for _, event := range m.snapshot.Events {
-		lines = append(lines, fmt.Sprintf("%s  %-16s %s", event.Time.Format("15:04:05"), trim(event.TunnelID, 16), event.Message))
+		line := fmt.Sprintf("%s  %-16s  %s", event.Time.Format("15:04:05"), trim(event.TunnelID, 16), event.Message)
+		lines = append(lines, renderEventLine(line, event.Message))
 	}
 	if len(m.snapshot.Events) == 0 {
-		lines = append(lines, "暂无运行事件")
+		lines = append(lines, clientMutedStyle.Render("暂无运行事件"))
 	}
-	return box(strings.Join(lines, "\n"))
+	return clientBox("事件 / Events", strings.Join(lines, "\n"))
+}
+
+// renderNavigation 以选中背景区分当前客户端页面。
+func (m *Model) renderNavigation() string {
+	labels := []string{"1:隧道", "2:状态", "3:事件"}
+	items := make([]string, 0, len(labels))
+	for index, label := range labels {
+		if index == m.page {
+			items = append(items, clientActiveTabStyle.Render(label))
+		} else {
+			items = append(items, clientInactiveTabStyle.Render(label))
+		}
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Left, items...)
+}
+
+// renderConnectionStatus 根据连接状态突出显示当前可用性。
+func renderConnectionStatus(status string) string {
+	switch status {
+	case "connected":
+		return clientConnectedStyle.Render(status)
+	case "connecting":
+		return clientConnectingStyle.Render(status)
+	default:
+		return clientDisconnectedStyle.Render(status)
+	}
+}
+
+// renderEventLine 根据运行事件的严重程度显示颜色。
+func renderEventLine(line, message string) string {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "failed"), strings.Contains(lower, "error"), strings.Contains(message, "断开"):
+		return clientEventErrorStyle.Render(line)
+	case strings.Contains(lower, "connecting"), strings.Contains(lower, "change"), strings.Contains(message, "重连"):
+		return clientEventWarnStyle.Render(line)
+	default:
+		return clientEventInfoStyle.Render(line)
+	}
 }
 
 func (m *Model) help() string {
@@ -265,6 +322,37 @@ func bytes(value int64) string {
 	}
 	return fmt.Sprintf("%.1fMB", float64(value)/(unit*unit))
 }
-func box(value string) string {
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2).Render(value)
+
+// clientBox 为客户端页面构建带标题的统一信息面板。
+func clientBox(title, body string) string {
+	return clientBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, clientBoxTitleStyle.Render(title), body))
 }
+
+var (
+	clientPrimaryColor = lipgloss.Color("#67E8F9")
+	clientAccentColor  = lipgloss.Color("#22D3EE")
+	clientMutedColor   = lipgloss.Color("#64748B")
+	clientPanelColor   = lipgloss.Color("#1E293B")
+	clientSelectColor  = lipgloss.Color("#0E7490")
+
+	clientTitleStyle        = lipgloss.NewStyle().Bold(true).Foreground(clientPrimaryColor).Padding(0, 1)
+	clientVersionStyle      = lipgloss.NewStyle().Foreground(clientMutedColor).MarginLeft(1)
+	clientActiveTabStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#042F2E")).Background(clientAccentColor).Padding(0, 2)
+	clientInactiveTabStyle  = lipgloss.NewStyle().Foreground(clientMutedColor).Background(clientPanelColor).Padding(0, 2)
+	clientBoxStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(clientMutedColor).Padding(0, 1).MarginTop(1)
+	clientBoxTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(clientAccentColor).MarginBottom(1)
+	clientTableHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBD5E1"))
+	clientSelectedRowStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ECFEFF")).Background(clientSelectColor)
+	clientEnabledStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
+	clientDisabledStyle     = lipgloss.NewStyle().Foreground(clientMutedColor)
+	clientConnectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC"))
+	clientConnectingStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FDE68A"))
+	clientDisconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FCA5A5"))
+	clientRateStyle         = lipgloss.NewStyle().Foreground(clientPrimaryColor)
+	clientMetricStyle       = lipgloss.NewStyle().Bold(true).Foreground(clientPrimaryColor)
+	clientMutedStyle        = lipgloss.NewStyle().Foreground(clientMutedColor)
+	clientEventInfoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A7F3D0"))
+	clientEventWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A"))
+	clientEventErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
+	clientErrorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Bold(true)
+)

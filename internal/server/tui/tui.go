@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -109,6 +110,8 @@ type Model struct {
 	attached     bool
 	statusLoader AttachedStatusLoader
 	modeSwitcher func() error
+	logPath      string
+	appVersion   string
 
 	page   page
 	cursor map[page]int
@@ -159,6 +162,7 @@ func New(a *app.App, store *configstore.Store, logger *slog.Logger) *Model {
 		height:     24,
 		showDetail: true,
 		logLines:   make([]string, 0, 100),
+		appVersion: "dev",
 	}
 	for p := page(0); p < numPages; p++ {
 		m.cursor[p] = 0
@@ -181,6 +185,7 @@ func NewAttached(store *configstore.Store, logger *slog.Logger, statusLoader Att
 		height:       24,
 		showDetail:   true,
 		logLines:     make([]string, 0, 100),
+		appVersion:   "dev",
 	}
 	for p := page(0); p < numPages; p++ {
 		m.cursor[p] = 0
@@ -191,6 +196,12 @@ func NewAttached(store *configstore.Store, logger *slog.Logger, statusLoader Att
 
 // SetModeSwitcher 设置切换到客户端模式的持久化回调，由命令层决定配置路径。
 func (m *Model) SetModeSwitcher(switcher func() error) { m.modeSwitcher = switcher }
+
+// SetVersion 设置显示在终端界面标题中的程序版本。
+func (m *Model) SetVersion(value string) { m.appVersion = value }
+
+// SetLogPath 设置后台日志文件路径，刷新时会读取最近日志用于高亮展示。
+func (m *Model) SetLogPath(path string) { m.logPath = path }
 
 // LogLine appends a single log line to the model's log buffer, trimming to
 // the most recent 100 lines.
@@ -508,12 +519,12 @@ func (m *Model) startInput(kind inputKind) (tea.Model, tea.Cmd) {
 		typ.SetValue(config.ConnectionTypeTCP)
 		name := newTextInput("my-connection")
 		host := newTextInput("(empty=any, http only)")
-		port := newTextInput("9000")
+		port := newTextInput("9000 (HTTP: 0=default Web port)")
 		target := newTextInput("localhost:8080")
 		token := newTextInput("(empty=auto-generate)")
 		forwardHost := newTextInput("false")
 		inputs = []textinput.Model{typ, name, host, port, target, token, forwardHost}
-		labels = []string{"Protocol (HTTP/TCP/UDP)", "Name", "Host", "Listen Port", "Target", "Token", "Forward Host (HTTP only)"}
+		labels = []string{"Protocol (HTTP/TCP/UDP)", "Name", "Host", "Listen Port (HTTP: 0=default Web)", "Target", "Token", "Forward Host (HTTP only)"}
 		title = "新建连接 / Create Connection"
 	case inputEditConn:
 		c := m.selectedConnection()
@@ -530,14 +541,14 @@ func (m *Model) startInput(kind inputKind) (tea.Model, tea.Cmd) {
 		name.SetValue(c.Name)
 		host := newTextInput("(empty=any, http only)")
 		host.SetValue(c.Host)
-		port := newTextInput("9000")
+		port := newTextInput("9000 (HTTP: 0=default Web port)")
 		port.SetValue(strconv.Itoa(c.ListenPort))
 		target := newTextInput("localhost:8080")
 		target.SetValue(c.Target)
 		forwardHost := newTextInput("false")
 		forwardHost.SetValue(strconv.FormatBool(c.ForwardHost))
 		inputs = []textinput.Model{typ, name, host, port, target, forwardHost}
-		labels = []string{"Protocol (HTTP/TCP/UDP)", "Name", "Host", "Listen Port", "Target", "Forward Host (HTTP only)"}
+		labels = []string{"Protocol (HTTP/TCP/UDP)", "Name", "Host", "Listen Port (HTTP: 0=default Web)", "Target", "Forward Host (HTTP only)"}
 		title = fmt.Sprintf("编辑连接 / Edit Connection (%s)", c.ID)
 		m.editID = c.ID
 	case inputToken:
@@ -554,7 +565,7 @@ func (m *Model) startInput(kind inputKind) (tea.Model, tea.Cmd) {
 		cfg := m.store.Get()
 		tunnelListen := newTextInput(":7001")
 		tunnelListen.SetValue(cfg.Server.TunnelListen)
-		httpListen := newTextInput(":80")
+		httpListen := newTextInput(":7777")
 		httpListen.SetValue(cfg.Server.HTTPListen)
 		httpsListen := newTextInput(":443")
 		httpsListen.SetValue(cfg.Server.HTTPSListen)
@@ -618,8 +629,14 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 				m.errMsg = "invalid listen port (1-65535)"
 				return m, nil
 			}
+		} else if portStr != "" {
+			var err error
+			port, err = strconv.Atoi(portStr)
+			if err != nil || port < 0 || port > 65535 {
+				m.errMsg = "invalid listen port (0-65535)"
+				return m, nil
+			}
 		}
-		// http 类型: port 可为 0，host 可为空
 		m.mode = modeNormal
 		return m, m.createConnection(name, connType, host, port, target, forwardHost, token)
 
@@ -661,6 +678,13 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 			port, err = strconv.Atoi(portStr)
 			if err != nil || port <= 0 || port > 65535 {
 				m.errMsg = "invalid listen port (1-65535)"
+				return m, nil
+			}
+		} else if portStr != "" {
+			var err error
+			port, err = strconv.Atoi(portStr)
+			if err != nil || port < 0 || port > 65535 {
+				m.errMsg = "invalid listen port (0-65535)"
 				return m, nil
 			}
 		}
@@ -973,6 +997,7 @@ func (m *Model) isConnectionOnline(connID string) bool {
 }
 
 func (m *Model) refresh() {
+	m.refreshLogLines()
 	if !m.attached {
 		m.stats = m.app.GetStats()
 		m.onlineClients = m.app.GetOnlineClients()
@@ -1001,7 +1026,7 @@ func (m *Model) refresh() {
 // --- rendering ----------------------------------------------------------
 
 func (m *Model) renderTitle() string {
-	title := titleStyle.Render("◉ GoPit Server")
+	title := titleStyle.Render("◉ GoPit Server") + versionStyle.Render("v"+m.appVersion)
 
 	var tabs []string
 	for i, name := range pageNames {
@@ -1165,7 +1190,11 @@ func (m *Model) renderLogs() string {
 	if len(m.logLines) == 0 {
 		body = lipgloss.NewStyle().Foreground(mutedColor).Render("(暂无日志 / no logs yet)")
 	} else {
-		body = strings.Join(m.logLines, "\n")
+		lines := make([]string, 0, len(m.logLines))
+		for _, line := range m.logLines {
+			lines = append(lines, renderLogLine(line))
+		}
+		body = strings.Join(lines, "\n")
 	}
 	return sectionBox("日志输出 / Logs", body)
 }
@@ -1358,11 +1387,42 @@ func renderProtocolSelector(selected int) string {
 	for i, connType := range connectionTypes {
 		label := strings.ToUpper(connType)
 		if i == selected {
-			label = "[" + label + "]"
+			options = append(options, selectedProtocolStyle.Render(label))
+			continue
 		}
-		options = append(options, label)
+		options = append(options, unselectedProtocolStyle.Render(label))
 	}
-	return strings.Join(options, "  ")
+	return lipgloss.JoinHorizontal(lipgloss.Left, options...)
+}
+
+// refreshLogLines 从后台日志文件加载最近的 100 条记录。
+func (m *Model) refreshLogLines() {
+	if m.logPath == "" {
+		return
+	}
+	data, err := os.ReadFile(m.logPath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) > 100 {
+		lines = lines[len(lines)-100:]
+	}
+	m.logLines = lines
+}
+
+// renderLogLine 按日志级别突出显示服务端事件。
+func renderLogLine(line string) string {
+	switch {
+	case strings.Contains(line, "level=ERROR"):
+		return logErrorStyle.Render(line)
+	case strings.Contains(line, "level=WARN"):
+		return logWarnStyle.Render(line)
+	case strings.Contains(line, "level=INFO"):
+		return logInfoStyle.Render(line)
+	default:
+		return logDebugStyle.Render(line)
+	}
 }
 
 // generateID returns a random hex id with the given prefix.
@@ -1477,4 +1537,24 @@ var (
 			BorderForeground(warnColor).
 			Padding(1, 2).
 			MarginTop(1)
+
+	versionStyle = lipgloss.NewStyle().
+			Foreground(mutedColor).
+			MarginLeft(1)
+
+	selectedProtocolStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#0F172A")).
+				Background(accentColor).
+				Padding(0, 2)
+
+	unselectedProtocolStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#CBD5E1")).
+				Background(panelColor).
+				Padding(0, 2)
+
+	logInfoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
+	logWarnStyle  = lipgloss.NewStyle().Foreground(warnColor)
+	logErrorStyle = lipgloss.NewStyle().Foreground(errColor).Bold(true)
+	logDebugStyle = lipgloss.NewStyle().Foreground(mutedColor)
 )

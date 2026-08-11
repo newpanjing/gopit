@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -231,6 +233,8 @@ func runAttachedTUI(configPath string) {
 		snapshot, err := management.ReadSnapshot(socketPath)
 		return snapshot.Stats, snapshot.OnlineClients, err
 	})
+	model.SetVersion(version)
+	model.SetLogPath(strings.TrimSuffix(configPath, filepath.Ext(configPath)) + ".log")
 	model.SetModeSwitcher(func() error { return saveRuntimeState(runtime.ModeClient, clientConfigPathFor(configPath)) })
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -242,6 +246,7 @@ func runAttachedTUI(configPath string) {
 func runClientTUI(configPath string) {
 	logger := observability.NewLogger(slog.LevelInfo)
 	model := clientui.NewAttached(configPath, logger)
+	model.SetVersion(version)
 	model.SetModeSwitcher(func() error { return saveRuntimeState(runtime.ModeServer, serverConfigPathFor(configPath)) })
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -341,6 +346,7 @@ func runServer(configPath string, showTUI, daemon bool) {
 	defer application.Stop()
 	if showTUI {
 		model := serverui.New(application, store, logger)
+		model.SetVersion(version)
 		p := tea.NewProgram(model, tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "TUI 错误: %v\n", err)
@@ -537,6 +543,20 @@ func cmdUpgrade(args []string) {
 		fmt.Fprintln(os.Stderr, "用法: pit upgrade")
 		os.Exit(1)
 	}
+	latestVersion, err := fetchLatestReleaseVersion()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "检查最新版本失败: %v\n", err)
+		os.Exit(1)
+	}
+	if version != "dev" {
+		comparison, comparable := compareVersions(latestVersion, version)
+		if comparable && comparison <= 0 {
+			fmt.Printf("当前已是最新版本: %s\n", version)
+			return
+		}
+	}
+	fmt.Printf("发现新版本: %s -> %s\n", version, latestVersion)
+
 	executable, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "定位当前程序失败: %v\n", err)
@@ -546,8 +566,15 @@ func cmdUpgrade(args []string) {
 	if goruntime.GOOS == "windows" {
 		asset += ".exe"
 	}
-	url := "https://github.com/newpanjing/gopit/releases/latest/download/" + asset
-	response, err := http.Get(url)
+	url := "https://github.com/newpanjing/gopit/releases/download/" + latestVersion + "/" + asset
+	request, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "创建下载请求失败: %v\n", err)
+		os.Exit(1)
+	}
+	request.Header.Set("User-Agent", "gopit-upgrade")
+	fmt.Printf("正在下载 %s...\n", asset)
+	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "下载升级文件失败: %v\n", err)
 		os.Exit(1)
@@ -564,7 +591,8 @@ func cmdUpgrade(args []string) {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if _, err := io.Copy(temporary, response.Body); err != nil {
+	progress := &downloadProgress{total: response.ContentLength}
+	if _, err := io.Copy(temporary, io.TeeReader(response.Body, progress)); err != nil {
 		temporary.Close()
 		fmt.Fprintf(os.Stderr, "写入升级文件失败: %v\n", err)
 		os.Exit(1)
@@ -581,7 +609,140 @@ func cmdUpgrade(args []string) {
 		fmt.Fprintf(os.Stderr, "替换当前程序失败: %v\n请手动下载: %s\n", err, url)
 		os.Exit(1)
 	}
-	fmt.Printf("升级完成: %s\n", asset)
+	progress.finish()
+	fmt.Printf("升级完成: %s -> %s\n", version, latestVersion)
+	restartAfterUpgrade()
+}
+
+const latestReleaseAPI = "https://api.github.com/repos/newpanjing/gopit/releases/latest"
+
+// releaseInfo 仅保留升级检查所需的 GitHub Release 字段。
+type releaseInfo struct {
+	TagName string `json:"tag_name"`
+}
+
+// downloadProgress 在终端中显示下载进度，避免下载过程无反馈。
+type downloadProgress struct {
+	total       int64
+	written     int64
+	lastPercent int
+}
+
+// Write 接收下载字节并在进度变化时刷新终端输出。
+func (p *downloadProgress) Write(data []byte) (int, error) {
+	p.written += int64(len(data))
+	if p.total > 0 {
+		percent := int(p.written * 100 / p.total)
+		if percent != p.lastPercent {
+			p.lastPercent = percent
+			fmt.Printf("\r下载进度: %3d%%  %s / %s", percent, formatDownloadBytes(p.written), formatDownloadBytes(p.total))
+		}
+	} else {
+		fmt.Printf("\r已下载: %s", formatDownloadBytes(p.written))
+	}
+	return len(data), nil
+}
+
+// finish 结束单行进度输出。
+func (p *downloadProgress) finish() {
+	if p.total > 0 && p.lastPercent < 100 {
+		fmt.Printf("\r下载进度: 100%%  %s / %s", formatDownloadBytes(p.written), formatDownloadBytes(p.total))
+	}
+	fmt.Println()
+}
+
+// formatDownloadBytes 将下载字节数格式化为终端进度中使用的紧凑单位。
+func formatDownloadBytes(value int64) string {
+	const unit = int64(1024)
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	amount := float64(value)
+	index := 0
+	for amount >= float64(unit) && index < len(units)-1 {
+		amount /= float64(unit)
+		index++
+	}
+	if index == 0 {
+		return fmt.Sprintf("%d%s", value, units[index])
+	}
+	return fmt.Sprintf("%.1f%s", amount, units[index])
+}
+
+// fetchLatestReleaseVersion 查询 GitHub 最新发布标签。
+func fetchLatestReleaseVersion() (string, error) {
+	request, err := http.NewRequest(http.MethodGet, latestReleaseAPI, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("User-Agent", "gopit-upgrade")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned HTTP %s", response.Status)
+	}
+	var release releaseInfo
+	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	if release.TagName == "" {
+		return "", fmt.Errorf("latest release has no tag")
+	}
+	return release.TagName, nil
+}
+
+// compareVersions 比较 vMAJOR.MINOR.PATCH 格式版本，返回最新版本相对当前版本的大小。
+func compareVersions(latest, current string) (int, bool) {
+	latestParts, latestOK := parseVersion(latest)
+	currentParts, currentOK := parseVersion(current)
+	if !latestOK || !currentOK {
+		return 0, false
+	}
+	for index := range latestParts {
+		if latestParts[index] > currentParts[index] {
+			return 1, true
+		}
+		if latestParts[index] < currentParts[index] {
+			return -1, true
+		}
+	}
+	return 0, true
+}
+
+// parseVersion 解析仅含三段数字的发布版本。
+func parseVersion(value string) ([3]int, bool) {
+	var result [3]int
+	parts := strings.Split(strings.TrimPrefix(value, "v"), ".")
+	if len(parts) != len(result) {
+		return result, false
+	}
+	for index, part := range parts {
+		parsed, err := strconv.Atoi(part)
+		if err != nil || parsed < 0 {
+			return result, false
+		}
+		result[index] = parsed
+	}
+	return result, true
+}
+
+// restartAfterUpgrade 检测当前后台模式；运行中时自动使用替换后的程序重启。
+func restartAfterUpgrade() {
+	state, err := loadRuntimeState()
+	if err != nil {
+		fmt.Println("未检测到已保存的运行模式，无需重启后台实例。")
+		return
+	}
+	running := isServerRunning(state.ConfigPath) || isClientRunning(state.ConfigPath)
+	if !running {
+		fmt.Println("后台实例未运行，下次执行 pit start 或 pit join 时将使用新版本。")
+		return
+	}
+	fmt.Println("正在重启后台实例以应用新版本...")
+	cmdRestart([]string{"-c", state.ConfigPath})
+	fmt.Println("后台实例已使用新版本重启。")
 }
 
 // --- PID 文件管理 -------------------------------------------------------
@@ -1025,7 +1186,7 @@ func createDefaultServerConfig(path string) error {
 			Host:          "0.0.0.0",
 			Port:          7001,
 			TunnelListen:  ":7001",
-			HTTPListen:    ":80",
+			HTTPListen:    ":7777",
 			HTTPSListen:   ":443",
 			ConfigVersion: 1,
 		},

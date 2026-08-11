@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -38,10 +39,31 @@ func tailFile(path string) {
 			done = true
 		default:
 			if scanner.Scan() {
-				fmt.Println(scanner.Text())
+				fmt.Println(colorLogLine(scanner.Text()))
 			} else {
 				time.Sleep(200 * time.Millisecond)
 			}
 		}
+	}
+}
+
+// colorLogLine 根据结构化日志级别为终端实时日志着色，日志文件保持原始文本。
+func colorLogLine(line string) string {
+	const (
+		reset  = "\033[0m"
+		green  = "\033[32m"
+		yellow = "\033[33m"
+		red    = "\033[31m"
+		cyan   = "\033[36m"
+	)
+	switch {
+	case strings.Contains(line, "level=ERROR"):
+		return red + line + reset
+	case strings.Contains(line, "level=WARN"):
+		return yellow + line + reset
+	case strings.Contains(line, "level=INFO"):
+		return green + line + reset
+	default:
+		return cyan + line + reset
 	}
 }

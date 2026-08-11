@@ -78,15 +78,16 @@ type App struct {
 	sessions map[string]*ClientSession // connectionID -> session
 
 	// 端口监听器: connectionID -> *portListener
-	portListeners  map[string]*portListener
-	tunnelListener net.Listener
-	tunnelListen   string
-	httpServer     *http.Server
-	httpListen     string
-	httpStreams    sync.Map // streamID -> *httpStream
-	httpNextStream atomic.Uint32
-	stopCh         chan struct{}
-	wg             sync.WaitGroup
+	portListeners     map[string]*portListener
+	tunnelListener    net.Listener
+	tunnelListen      string
+	httpServer        *http.Server
+	httpListen        string
+	httpPortListeners map[string]*httpPortListener
+	httpStreams       sync.Map // streamID -> *httpStream
+	httpNextStream    atomic.Uint32
+	stopCh            chan struct{}
+	wg                sync.WaitGroup
 }
 
 // httpStream 保存 HTTP 请求对应的本地管道，响应数据通过隧道写入 serverConn。
@@ -95,15 +96,24 @@ type httpStream struct {
 	tunnel     *tunnel.TunnelConn
 }
 
+// httpPortListener 保存 HTTP 规则专属的直连监听器。
+type httpPortListener struct {
+	connID     string
+	listenPort int
+	listener   net.Listener
+	server     *http.Server
+}
+
 // New 创建服务端 App。
 func New(store *configstore.Store, logger *slog.Logger, tunnelCfg tunnel.Config) *App {
 	return &App{
-		store:         store,
-		logger:        logger,
-		tunnelCfg:     tunnelCfg,
-		sessions:      make(map[string]*ClientSession),
-		portListeners: make(map[string]*portListener),
-		stopCh:        make(chan struct{}),
+		store:             store,
+		logger:            logger,
+		tunnelCfg:         tunnelCfg,
+		sessions:          make(map[string]*ClientSession),
+		portListeners:     make(map[string]*portListener),
+		httpPortListeners: make(map[string]*httpPortListener),
+		stopCh:            make(chan struct{}),
 	}
 }
 
@@ -125,6 +135,7 @@ func (a *App) Start() error {
 
 	// 启动已配置连接的端口监听
 	a.startPortListeners(cfg)
+	a.startHTTPPortListeners(cfg)
 	if err := a.startHTTPServer(cfg); err != nil {
 		a.Stop()
 		return err
@@ -159,6 +170,62 @@ func (a *App) startHTTPServer(cfg *config.ServerConfig) error {
 		}
 	}()
 	return nil
+}
+
+// startHTTPPortListeners 为配置了独立端口的 HTTP 连接启动专属入口。
+func (a *App) startHTTPPortListeners(cfg *config.ServerConfig) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, conn := range cfg.Connections {
+		if !conn.Enabled || conn.Type != config.ConnectionTypeHTTP || conn.ListenPort <= 0 {
+			continue
+		}
+		if _, exists := a.httpPortListeners[conn.ID]; exists {
+			continue
+		}
+		if err := a.startHTTPPortListenerLocked(conn, nil); err != nil {
+			a.logger.Error("failed to start direct http listener", "conn_id", conn.ID, "port", conn.ListenPort, "err", err)
+		}
+	}
+}
+
+// startHTTPPortListenerLocked 注册指定 HTTP 连接的独立监听器；调用方必须持有 App 锁。
+func (a *App) startHTTPPortListenerLocked(conn config.Connection, listener net.Listener) error {
+	if listener == nil {
+		var err error
+		listener, err = net.Listen("tcp", fmt.Sprintf(":%d", conn.ListenPort))
+		if err != nil {
+			return err
+		}
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		a.handleDirectHTTPRequest(writer, request, conn.ID)
+	})}
+	pl := &httpPortListener{connID: conn.ID, listenPort: conn.ListenPort, listener: listener, server: server}
+	a.httpPortListeners[conn.ID] = pl
+	a.logger.Info("direct http listener started", "conn_id", conn.ID, "name", conn.Name, "port", conn.ListenPort)
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			a.logger.Error("direct http listener stopped unexpectedly", "conn_id", conn.ID, "port", conn.ListenPort, "err", err)
+		}
+	}()
+	return nil
+}
+
+// stopHTTPPortListener 停止指定 HTTP 连接的独立监听器。
+func (a *App) stopHTTPPortListener(connID string) {
+	a.mu.Lock()
+	pl, ok := a.httpPortListeners[connID]
+	if ok {
+		delete(a.httpPortListeners, connID)
+	}
+	a.mu.Unlock()
+	if pl != nil {
+		_ = pl.server.Close()
+		a.logger.Info("direct http listener stopped", "conn_id", connID, "port", pl.listenPort)
+	}
 }
 
 // createTunnelListener 根据当前 TLS 配置创建隧道监听器。
@@ -334,13 +401,28 @@ func (a *App) handlePortConn(pl *portListener, conn net.Conn) {
 	}
 }
 
-// handleHTTPRequest 根据 Host 匹配 HTTP 规则，并通过隧道转发完整请求与响应。
+// handleHTTPRequest 处理默认 Web 端口请求，仅根据 Host 匹配 HTTP 规则。
 func (a *App) handleHTTPRequest(writer http.ResponseWriter, request *http.Request) {
 	rule, found := a.findHTTPConnection(request.Host)
 	if !found {
-		http.NotFound(writer, request)
+		http.Error(writer, "tunnel not found", http.StatusNotFound)
 		return
 	}
+	a.forwardHTTPRequest(writer, request, rule)
+}
+
+// handleDirectHTTPRequest 处理 HTTP 规则专属端口请求，不依赖请求 Host。
+func (a *App) handleDirectHTTPRequest(writer http.ResponseWriter, request *http.Request, connID string) {
+	rule := a.findConnectionByID(connID)
+	if rule.ID == "" || !rule.Enabled || rule.Type != config.ConnectionTypeHTTP || rule.ListenPort <= 0 {
+		http.Error(writer, "tunnel not found", http.StatusNotFound)
+		return
+	}
+	a.forwardHTTPRequest(writer, request, rule)
+}
+
+// forwardHTTPRequest 通过给定 HTTP 规则将完整请求和响应传输到客户端。
+func (a *App) forwardHTTPRequest(writer http.ResponseWriter, request *http.Request, rule config.Connection) {
 	serverConn, proxyConn := net.Pipe()
 	defer proxyConn.Close()
 	streamID, tc, err := a.openHTTPStream(rule.ID, serverConn)
@@ -400,23 +482,21 @@ func (a *App) forwardHTTPStream(streamID uint32, tc *tunnel.TunnelConn, serverCo
 	}
 }
 
-// findHTTPConnection 使用请求域名匹配启用的 HTTP 规则，空 Host 规则作为兜底。
+// findHTTPConnection 使用请求域名匹配启用的 HTTP 规则。
 func (a *App) findHTTPConnection(host string) (config.Connection, bool) {
 	requestHost := normalizeHTTPHost(host)
-	var fallback config.Connection
 	for _, connection := range a.store.Get().Connections {
 		if !connection.Enabled || connection.Type != config.ConnectionTypeHTTP {
 			continue
 		}
 		if connection.Host == "" {
-			fallback = connection
 			continue
 		}
 		if normalizeHTTPHost(connection.Host) == requestHost {
 			return connection, true
 		}
 	}
-	return fallback, fallback.ID != ""
+	return config.Connection{}, false
 }
 
 func normalizeHTTPHost(host string) string {
@@ -491,6 +571,10 @@ func (a *App) Stop() {
 
 	// 停止所有端口监听
 	a.mu.Lock()
+	for _, pl := range a.httpPortListeners {
+		_ = pl.server.Close()
+	}
+	a.httpPortListeners = make(map[string]*httpPortListener)
 	for _, pl := range a.portListeners {
 		pl.listener.Close()
 	}
@@ -779,6 +863,7 @@ func (a *App) onConfigReloaded(newCfg *config.ServerConfig) {
 
 	// 启动新的端口监听
 	a.startPortListeners(newCfg)
+	a.syncHTTPPortListeners(newCfg)
 
 	// 通知所有在线客户端
 	a.mu.RLock()
@@ -791,6 +876,27 @@ func (a *App) onConfigReloaded(newCfg *config.ServerConfig) {
 	for _, id := range connIDs {
 		a.notifyClient(id)
 	}
+}
+
+// syncHTTPPortListeners 根据最新配置增量更新 HTTP 规则的独立端口监听。
+func (a *App) syncHTTPPortListeners(cfg *config.ServerConfig) {
+	a.mu.RLock()
+	currentIDs := make([]string, 0, len(a.httpPortListeners))
+	for id := range a.httpPortListeners {
+		currentIDs = append(currentIDs, id)
+	}
+	a.mu.RUnlock()
+
+	for _, id := range currentIDs {
+		conn, found := a.findConnection(cfg, id)
+		a.mu.RLock()
+		pl := a.httpPortListeners[id]
+		a.mu.RUnlock()
+		if !found || pl == nil || !conn.Enabled || conn.Type != config.ConnectionTypeHTTP || conn.ListenPort <= 0 || pl.listenPort != conn.ListenPort {
+			a.stopHTTPPortListener(id)
+		}
+	}
+	a.startHTTPPortListeners(cfg)
 }
 
 // restartHTTPServer 在 HTTP 监听地址变更后先绑定新端口，再关闭旧入口。
@@ -993,6 +1099,7 @@ func (a *App) CreateConnection(name, connType, host string, listenPort int, targ
 	} else {
 		a.logger.Info("connection created", "conn_id", connID, "name", name, "type", connType, "host", host)
 	}
+	a.onConfigReloaded(a.store.Get())
 
 	return connID, token, nil
 }
@@ -1062,6 +1169,7 @@ func (a *App) UpdateConnection(connID, name, connType, host string, listenPort i
 	if oldConn.Type == config.ConnectionTypeTCP && connType != config.ConnectionTypeTCP {
 		a.stopPortListener(connID)
 	}
+	a.onConfigReloaded(a.store.Get())
 
 	return nil
 }
@@ -1172,6 +1280,7 @@ func (a *App) SetConnectionEnabled(connID string, enabled bool) error {
 		a.stopPortListener(connID)
 		a.disconnectConnection(connID)
 	}
+	a.onConfigReloaded(a.store.Get())
 	return nil
 }
 
@@ -1196,7 +1305,9 @@ func (a *App) DeleteConnection(connID string) error {
 
 	if err == nil {
 		a.stopPortListener(connID)
+		a.stopHTTPPortListener(connID)
 		a.disconnectConnection(connID)
+		a.onConfigReloaded(a.store.Get())
 	}
 	return err
 }
