@@ -269,7 +269,6 @@ func startDaemon(configPath string) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		fmt.Fprintf(os.Stderr, "启动后台服务失败: %v\n", err)
@@ -713,7 +712,6 @@ func startClientDaemon(configPath string) {
 	}
 	cmd := exec.Command(executable, "join", "--run", "-c", absConfig)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = logFile, logFile, nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		fmt.Fprintf(os.Stderr, "启动后台客户端失败: %v\n", err)
