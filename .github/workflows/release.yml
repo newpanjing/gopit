@@ -63,13 +63,38 @@ jobs:
           merge-multiple: true
       - name: Create release and upload executables
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
-          if ! gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release create "${TAG}" --title "${TAG}" --generate-notes
+          api_url="https://api.github.com/repos/${REPOSITORY}/releases"
+          release_json="$(curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}" \
+            --data "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"generate_release_notes\":true}" \
+            || true)"
+          if printf '%s' "${release_json}" | grep -q '"id"'; then
+            release_id="$(printf '%s' "${release_json}" | jq -r '.id')"
+          else
+            release_json="$(curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_url}/tags/${TAG}")"
+            release_id="$(printf '%s' "${release_json}" | jq -r '.id')"
           fi
           find release-assets -type f -print0 | while IFS= read -r -d '' asset; do
-            gh release upload "${TAG}" "${asset}" --clobber
+            asset_name="$(basename "${asset}")"
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "Content-Type: application/octet-stream" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --data-binary "@${asset}" \
+              "https://uploads.github.com/repos/${REPOSITORY}/releases/${release_id}/assets?name=${asset_name}"
           done
