@@ -15,7 +15,7 @@ import (
 	"gopit/internal/config"
 )
 
-const refreshInterval = time.Second
+const refreshInterval = 500 * time.Millisecond
 
 const githubRepositoryURL = "github.com/newpanjing/gopit"
 
@@ -27,6 +27,7 @@ const (
 	clientEnabledWidth = 9
 	clientStatusWidth  = 12
 	clientStreamsWidth = 8
+	clientLogRowCount  = 12
 )
 
 type tickMsg time.Time
@@ -124,6 +125,7 @@ func (m *Model) View() string {
 		m.width = 90
 	}
 	header := clientTitleStyle.Render("◉ GoPit Client") + clientVersionStyle.Render("v"+strings.TrimPrefix(m.appVersion, "v"))
+	repository := clientGitHubStyle.Render(githubRepositoryURL)
 	nav := m.renderNavigation()
 	var content string
 	switch m.page {
@@ -137,7 +139,7 @@ func (m *Model) View() string {
 	if m.errMsg != "" {
 		content += "\n" + clientErrorStyle.Render("⚠ "+m.errMsg)
 	}
-	return header + "\n" + nav + "\n\n" + content + "\n\n" + m.help()
+	return header + "\n" + repository + "\n" + nav + "\n\n" + content + "\n\n" + m.help()
 }
 
 func (m *Model) refresh() {
@@ -170,7 +172,7 @@ func (m *Model) renderTunnels() string {
 		if target == "" {
 			target = "-"
 		}
-		status := renderConnectionStatus(fixedClientCell(item.Status.Status, clientStatusWidth))
+		status := renderConnectionStatus(item.Status.Status)
 		line := renderTunnelRow("", trim(name, clientNameWidth), trim(target, clientForwardWidth), trim(item.Server, clientServerWidth), enabled, status, fmt.Sprintf("%d", item.Status.ActiveStreams), clientRateStyle.Render(rate))
 		if index == m.cursor {
 			line = clientSelectedRowStyle.Render(renderTunnelRow("▸", line))
@@ -235,12 +237,12 @@ func (m *Model) renderStatus() string {
 
 // renderLogs 仅渲染客户端转发完成的请求记录，避免状态事件干扰请求日志。
 func (m *Model) renderLogs() string {
-	rows := []string{clientTableHeaderStyle.Render(renderClientLogRow("Time", "Method", "Address", "Forward", "Duration"))}
+	requestRows := make([]string, 0, clientLogRowCount-1)
 	for _, event := range m.snapshot.Events {
 		if event.Method == "" {
 			continue
 		}
-		rows = append(rows, renderClientLogRow(
+		requestRows = append(requestRows, renderClientLogRow(
 			clientLogTimeStyle.Render(fixedClientCell(event.Time.Format("15:04:05"), 10)),
 			clientLogMethodStyle.Render(fixedClientCell(event.Method, 8)),
 			clientLogAddressStyle.Render(fixedClientCell(trim(event.Address, 28), 28)),
@@ -248,8 +250,16 @@ func (m *Model) renderLogs() string {
 			renderClientDuration(event.Duration),
 		))
 	}
-	if len(rows) == 1 {
+	if len(requestRows) > clientLogRowCount-1 {
+		requestRows = requestRows[len(requestRows)-(clientLogRowCount-1):]
+	}
+	rows := []string{clientTableHeaderStyle.Render(renderClientLogRow("Time", "Method", "Address", "Forward", "Duration"))}
+	if len(requestRows) == 0 {
 		rows = append(rows, clientMutedStyle.Render("暂无请求日志"))
+	}
+	rows = append(rows, requestRows...)
+	for len(rows) < clientLogRowCount {
+		rows = append(rows, "")
 	}
 	return clientBox("日志 / Logs", strings.Join(rows, "\n"))
 }
@@ -291,24 +301,24 @@ func (m *Model) renderNavigation() string {
 	return lipgloss.JoinHorizontal(lipgloss.Left, items...)
 }
 
-// renderConnectionStatus 根据连接状态突出显示当前可用性。
+// renderConnectionStatus 使用状态符号突出显示当前客户端连接可用性。
 func renderConnectionStatus(status string) string {
-	switch status {
+	switch strings.TrimSpace(status) {
 	case "connected":
-		return clientConnectedStyle.Render(status)
+		return clientConnectedStyle.Render(fixedClientCell("✓", clientStatusWidth))
 	case "connecting":
-		return clientConnectingStyle.Render(status)
+		return clientConnectingStyle.Render(fixedClientCell("…", clientStatusWidth))
 	default:
-		return clientDisconnectedStyle.Render(status)
+		return clientDisconnectedStyle.Render(fixedClientCell("✗", clientStatusWidth))
 	}
 }
 
 // renderEventLine 根据运行事件的严重程度显示颜色。
 func (m *Model) help() string {
 	if m.page == 0 {
-		return "↑↓:选择  space:启动/停止  d:移除  m:服务端模式  ←→:切换页面  q:退出\n" + clientGitHubStyle.Render(githubRepositoryURL)
+		return "↑↓:选择  space:启动/停止  d:移除  m:服务端模式  ←→:切换页面  q:退出"
 	}
-	return "←→:切换页面  q:退出\n" + clientGitHubStyle.Render(githubRepositoryURL)
+	return "←→:切换页面  q:退出"
 }
 
 func (m *Model) toggleSelected() {

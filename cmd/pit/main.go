@@ -103,8 +103,8 @@ var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println(usage)
-		os.Exit(0)
+		cmdTUI(nil)
+		return
 	}
 
 	cmd := os.Args[1]

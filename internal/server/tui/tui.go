@@ -42,6 +42,7 @@ const (
 var pageNames = [numPages]string{"隧道", "状态", "日志", "设置"}
 
 const githubRepositoryURL = "github.com/newpanjing/gopit"
+const serverLogRowCount = 12
 
 type mode int
 
@@ -733,7 +734,7 @@ func (m *Model) submitInput() (tea.Model, tea.Cmd) {
 // --- commands -----------------------------------------------------------
 
 func tick() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -1051,7 +1052,7 @@ func (m *Model) renderTitle() string {
 		}
 	}
 	tabsRow := lipgloss.JoinHorizontal(lipgloss.Bottom, tabs...)
-	return lipgloss.JoinVertical(lipgloss.Left, title, tabsRow, "")
+	return lipgloss.JoinVertical(lipgloss.Left, title, githubStyle.Render(githubRepositoryURL), tabsRow, "")
 }
 
 func (m *Model) renderStatus() string {
@@ -1064,7 +1065,7 @@ func (m *Model) renderStatus() string {
 	case pageSettings:
 		hints = "e:编辑  |  " + hints
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, statusBarStyle.Render(hints), githubStyle.Render(githubRepositoryURL))
+	return statusBarStyle.Render(hints)
 }
 
 func (m *Model) renderError() string {
@@ -1196,16 +1197,24 @@ func (m *Model) renderStatusPage() string {
 }
 
 func (m *Model) renderLogs() string {
-	lines := []string{headerStyle.Render(renderRequestLogRow("Time", "Method", "Address", "Response Time"))}
+	requestRows := make([]string, 0, serverLogRowCount-1)
 	for _, line := range m.logLines {
 		entry, ok := parseRequestLogLine(line)
 		if !ok {
 			continue
 		}
-		lines = append(lines, renderRequestLogEntry(entry))
+		requestRows = append(requestRows, renderRequestLogEntry(entry))
 	}
-	if len(lines) == 1 {
+	if len(requestRows) > serverLogRowCount-1 {
+		requestRows = requestRows[len(requestRows)-(serverLogRowCount-1):]
+	}
+	lines := []string{headerStyle.Render(renderRequestLogRow("Time", "Method", "Address", "Response Time"))}
+	if len(requestRows) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(mutedColor).Render("暂无请求日志 / no request logs yet"))
+	}
+	lines = append(lines, requestRows...)
+	for len(lines) < serverLogRowCount {
+		lines = append(lines, "")
 	}
 	return sectionBox("日志 / Logs", strings.Join(lines, "\n"))
 }
