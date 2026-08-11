@@ -22,6 +22,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"gopit/internal/client/agent"
 	clientmanagement "gopit/internal/client/management"
@@ -1099,10 +1100,13 @@ func cmdJoin(args []string) {
 		os.Exit(1)
 	}
 
-	// 如果未指定 server 地址，尝试从已有配置读取
+	// 如果未指定 server 地址，优先按 Token 复用已有隧道的服务端地址。
 	if serverAddr == "" {
-		if existing, err := config.LoadClientConfig(configPath); err == nil && existing != nil {
-			serverAddr = existing.Server.Address
+		var resolveErr error
+		serverAddr, resolveErr = savedServerAddress(configPath, token)
+		if resolveErr != nil {
+			fmt.Fprintf(os.Stderr, "加载客户端配置失败: %v\n", resolveErr)
+			os.Exit(1)
 		}
 	}
 	if serverAddr == "" {
@@ -1115,7 +1119,28 @@ func cmdJoin(args []string) {
 		os.Exit(1)
 	}
 
-	if err := addClientTunnel(configPath, serverAddr, token); err != nil {
+	message := "隧道已添加"
+	_, exists, err := findClientTunnel(configPath, serverAddr, token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "加载客户端配置失败: %v\n", err)
+		os.Exit(1)
+	}
+	if exists {
+		overwrite, promptErr := confirmTunnelOverwrite(serverAddr)
+		if promptErr != nil {
+			fmt.Fprintf(os.Stderr, "显示隧道覆盖提示失败: %v\n", promptErr)
+			os.Exit(1)
+		}
+		if !overwrite {
+			fmt.Println("已取消添加隧道")
+			return
+		}
+		if err := overwriteClientTunnel(configPath, serverAddr, token); err != nil {
+			fmt.Fprintf(os.Stderr, "覆盖隧道失败: %v\n", err)
+			os.Exit(1)
+		}
+		message = "隧道已覆盖"
+	} else if err := addClientTunnel(configPath, serverAddr, token); err != nil {
 		fmt.Fprintf(os.Stderr, "保存配置失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -1125,7 +1150,7 @@ func cmdJoin(args []string) {
 	}
 	if isClientRunning(configPath) {
 		pid, _ := readPID(configPath)
-		fmt.Printf("隧道已添加，客户端正在加载配置 (PID %d)\n", pid)
+		fmt.Printf("%s，客户端正在加载配置 (PID %d)\n", message, pid)
 		return
 	}
 
@@ -1224,10 +1249,7 @@ func addClientTunnel(path, serverAddr, token string) error {
 	if cfg == nil {
 		cfg = &config.ClientConfig{}
 	}
-	items := cfg.Tunnels
-	if len(items) == 0 && cfg.Server.Address != "" && cfg.Auth.Token != "" {
-		items = append(items, config.ClientTunnel{ID: "default", Name: "default", Server: cfg.Server.Address, Token: cfg.Auth.Token, Enabled: true})
-	}
+	items := clientTunnelDefinitions(cfg)
 	for _, item := range items {
 		if item.Server == serverAddr && item.Token == token {
 			return fmt.Errorf("该隧道已存在")
@@ -1241,6 +1263,135 @@ func addClientTunnel(path, serverAddr, token string) error {
 	cfg.Server, cfg.Auth, cfg.Tunnels = config.ServerRef{}, config.AuthRef{}, items
 	return config.SaveClientConfig(path, cfg)
 }
+
+// savedServerAddress 从同 Token 的历史隧道中读取服务端地址，并兼容旧版单隧道配置。
+func savedServerAddress(path, token string) (string, error) {
+	cfg, err := config.LoadClientConfig(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	for _, item := range clientTunnelDefinitions(cfg) {
+		if item.Token == token {
+			return item.Server, nil
+		}
+	}
+	return cfg.Server.Address, nil
+}
+
+// findClientTunnel 查找相同服务端和 Token 的已保存隧道。
+func findClientTunnel(path, serverAddr, token string) (config.ClientTunnel, bool, error) {
+	cfg, err := config.LoadClientConfig(path)
+	if os.IsNotExist(err) {
+		return config.ClientTunnel{}, false, nil
+	}
+	if err != nil {
+		return config.ClientTunnel{}, false, err
+	}
+	for _, item := range clientTunnelDefinitions(cfg) {
+		if item.Server == serverAddr && item.Token == token {
+			return item, true, nil
+		}
+	}
+	return config.ClientTunnel{}, false, nil
+}
+
+// overwriteClientTunnel 覆盖已存在的隧道定义，并确保其处于启用状态。
+func overwriteClientTunnel(path, serverAddr, token string) error {
+	cfg, err := config.LoadClientConfig(path)
+	if err != nil {
+		return err
+	}
+	items := clientTunnelDefinitions(cfg)
+	for index := range items {
+		if items[index].Server == serverAddr && items[index].Token == token {
+			items[index].Enabled = true
+			items[index].CreatedAt = time.Now().Format(time.RFC3339)
+			cfg.Server, cfg.Auth, cfg.Tunnels = config.ServerRef{}, config.AuthRef{}, items
+			return config.SaveClientConfig(path, cfg)
+		}
+	}
+	return fmt.Errorf("隧道不存在")
+}
+
+// clientTunnelDefinitions 统一读取新旧客户端配置中的隧道定义。
+func clientTunnelDefinitions(cfg *config.ClientConfig) []config.ClientTunnel {
+	if len(cfg.Tunnels) > 0 {
+		return append([]config.ClientTunnel(nil), cfg.Tunnels...)
+	}
+	if cfg.Server.Address == "" || cfg.Auth.Token == "" {
+		return nil
+	}
+	return []config.ClientTunnel{{ID: "default", Name: "default", Server: cfg.Server.Address, Token: cfg.Auth.Token, Enabled: true}}
+}
+
+// joinConflictModel 是重复隧道时显示的覆盖确认 TUI。
+type joinConflictModel struct {
+	serverAddr string
+	overwrite  bool
+}
+
+func (m joinConflictModel) Init() tea.Cmd { return nil }
+
+func (m joinConflictModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := message.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch key.String() {
+	case "left", "up", "c":
+		m.overwrite = false
+	case "right", "down", "o":
+		m.overwrite = true
+	case "enter":
+		return m, tea.Quit
+	case "q", "esc", "ctrl+c":
+		m.overwrite = false
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m joinConflictModel) View() string {
+	cancel := "取消"
+	overwrite := "覆盖"
+	if m.overwrite {
+		overwrite = duplicateActiveOptionStyle.Render(overwrite)
+		cancel = duplicateInactiveOptionStyle.Render(cancel)
+	} else {
+		cancel = duplicateActiveOptionStyle.Render(cancel)
+		overwrite = duplicateInactiveOptionStyle.Render(overwrite)
+	}
+	body := fmt.Sprintf("该服务端隧道已存在\n%s\n\n%s  %s\n\n←→ 选择  Enter 确认", m.serverAddr, cancel, overwrite)
+	return duplicateDialogStyle.Render(body)
+}
+
+// confirmTunnelOverwrite 显示重复隧道的取消或覆盖选择界面。
+func confirmTunnelOverwrite(serverAddr string) (bool, error) {
+	model := joinConflictModel{serverAddr: serverAddr}
+	result, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	if err != nil {
+		return false, err
+	}
+	return result.(joinConflictModel).overwrite, nil
+}
+
+var (
+	duplicateDialogStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#FBBF24")).
+				Padding(1, 3)
+	duplicateActiveOptionStyle = lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#0F172A")).
+					Background(lipgloss.Color("#FBBF24")).
+					Padding(0, 2)
+	duplicateInactiveOptionStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#CBD5E1")).
+					Padding(0, 2)
+)
 
 func newClientTunnelID() (string, error) {
 	data := make([]byte, 6)
