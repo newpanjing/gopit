@@ -22,6 +22,7 @@ func TestTUITunnelTerminology(t *testing.T) {
 	m := NewAttached(store, nil, func() (app.Stats, []app.OnlineClientInfo, error) {
 		return app.Stats{}, nil, nil
 	})
+	m.SetVersion("v1.2.20")
 
 	view := m.View()
 	if !strings.Contains(view, "隧道 / Tunnels") {
@@ -29,6 +30,48 @@ func TestTUITunnelTerminology(t *testing.T) {
 	}
 	if strings.Contains(view, "已附加后台服务") {
 		t.Fatalf("view contains internal attachment hint: %q", view)
+	}
+	if strings.Contains(view, "vv1.2.20") || !strings.Contains(view, "v1.2.20") {
+		t.Fatalf("view has invalid version label: %q", view)
+	}
+	if !strings.Contains(view, githubRepositoryURL) {
+		t.Fatalf("view missing repository address: %q", view)
+	}
+}
+
+// TestParseRequestLogLine 验证日志页仅解析服务端记录的 HTTP 请求完成事件。
+func TestParseRequestLogLine(t *testing.T) {
+	line := "time=2026-08-11T10:20:30.123+08:00 level=INFO msg=\"http request completed\" method=GET address=api.example.com/health target=127.0.0.1:8080 status=200 duration=12ms"
+	entry, ok := parseRequestLogLine(line)
+	if !ok {
+		t.Fatal("request log was not parsed")
+	}
+	if entry.Method != "GET" || entry.Address != "api.example.com/health" || entry.Status != 200 || entry.Duration != "12ms" {
+		t.Fatalf("entry = %#v", entry)
+	}
+	if _, ok := parseRequestLogLine("time=2026-08-11T10:20:30+08:00 level=INFO msg=\"server started\""); ok {
+		t.Fatal("non-request log was parsed")
+	}
+}
+
+// TestRefreshLogLinesOnlyOnLogPage 验证非日志页面不会读取后台日志文件。
+func TestRefreshLogLinesOnlyOnLogPage(t *testing.T) {
+	_, store, path := newTestApp(t)
+	logPath := filepath.Join(filepath.Dir(path), "server.log")
+	if err := os.WriteFile(logPath, []byte("time=2026-08-11T10:20:30+08:00 level=INFO msg=\"http request completed\" method=GET address=api.example.com/health status=200 duration=1ms\n"), 0600); err != nil {
+		t.Fatalf("write log file: %v", err)
+	}
+	m := NewAttached(store, nil, func() (app.Stats, []app.OnlineClientInfo, error) {
+		return app.Stats{}, nil, nil
+	})
+	m.SetLogPath(logPath)
+	m.refresh()
+	if len(m.logLines) != 0 {
+		t.Fatalf("log lines loaded outside log page: %#v", m.logLines)
+	}
+	m.setPage(pageLogs)
+	if len(m.logLines) != 1 {
+		t.Fatalf("log lines = %#v, want one entry", m.logLines)
 	}
 }
 

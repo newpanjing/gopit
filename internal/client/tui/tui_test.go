@@ -10,7 +10,7 @@ import (
 // TestRenderTunnelRowAlignment 验证表头和数据行的转发、服务器列使用同一固定起始位置。
 func TestRenderTunnelRowAlignment(t *testing.T) {
 	header := renderTunnelRow("", "Name", "Forward", "Server", "Enabled", "Status", "Streams", "Rate")
-	row := renderTunnelRow("▸", "production", "192.168.1.200:80", "192.168.1.188:7001", "enabled", "connected", "0", "↑0B/s ↓0B/s")
+	row := renderTunnelRow("▸", "production", "192.168.1.200:80", "192.168.1.188:7001", "✓", "connected", "0", "↑0B/s ↓0B/s")
 
 	for _, value := range []string{"Forward", "Server"} {
 		if strings.Index(header, value) < 0 {

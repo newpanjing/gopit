@@ -17,6 +17,8 @@ import (
 
 const refreshInterval = time.Second
 
+const githubRepositoryURL = "github.com/newpanjing/gopit"
+
 const (
 	clientMarkerWidth  = 2
 	clientNameWidth    = 18
@@ -121,7 +123,7 @@ func (m *Model) View() string {
 	if m.width == 0 {
 		m.width = 90
 	}
-	header := clientTitleStyle.Render("◉ GoPit Client") + clientVersionStyle.Render("v"+m.appVersion)
+	header := clientTitleStyle.Render("◉ GoPit Client") + clientVersionStyle.Render("v"+strings.TrimPrefix(m.appVersion, "v"))
 	nav := m.renderNavigation()
 	var content string
 	switch m.page {
@@ -130,7 +132,7 @@ func (m *Model) View() string {
 	case 1:
 		content = m.renderStatus()
 	default:
-		content = m.renderEvents()
+		content = m.renderLogs()
 	}
 	if m.errMsg != "" {
 		content += "\n" + clientErrorStyle.Render("⚠ "+m.errMsg)
@@ -160,9 +162,9 @@ func (m *Model) renderTunnels() string {
 			name = "-"
 		}
 		rate := fmt.Sprintf("↑%s/s ↓%s/s", bytes(item.SendRate), bytes(item.RecvRate))
-		enabled := clientDisabledStyle.Render(fixedClientCell("disabled", clientEnabledWidth))
+		enabled := clientDisabledStyle.Render(fixedClientCell("✗", clientEnabledWidth))
 		if item.Enabled {
-			enabled = clientEnabledStyle.Render(fixedClientCell("enabled", clientEnabledWidth))
+			enabled = clientEnabledStyle.Render(fixedClientCell("✓", clientEnabledWidth))
 		}
 		target := item.Status.Target
 		if target == "" {
@@ -231,21 +233,53 @@ func (m *Model) renderStatus() string {
 	return clientBox("状态 / Status", content)
 }
 
-func (m *Model) renderEvents() string {
-	lines := make([]string, 0, len(m.snapshot.Events))
+// renderLogs 仅渲染客户端转发完成的请求记录，避免状态事件干扰请求日志。
+func (m *Model) renderLogs() string {
+	rows := []string{clientTableHeaderStyle.Render(renderClientLogRow("Time", "Method", "Address", "Forward", "Duration"))}
 	for _, event := range m.snapshot.Events {
-		line := fmt.Sprintf("%s  %-16s  %s", event.Time.Format("15:04:05"), trim(event.TunnelID, 16), event.Message)
-		lines = append(lines, renderEventLine(line, event.Message))
+		if event.Method == "" {
+			continue
+		}
+		rows = append(rows, renderClientLogRow(
+			clientLogTimeStyle.Render(fixedClientCell(event.Time.Format("15:04:05"), 10)),
+			clientLogMethodStyle.Render(fixedClientCell(event.Method, 8)),
+			clientLogAddressStyle.Render(fixedClientCell(trim(event.Address, 28), 28)),
+			clientLogTargetStyle.Render(fixedClientCell(trim(event.Target, 24), 24)),
+			renderClientDuration(event.Duration),
+		))
 	}
-	if len(m.snapshot.Events) == 0 {
-		lines = append(lines, clientMutedStyle.Render("暂无运行事件"))
+	if len(rows) == 1 {
+		rows = append(rows, clientMutedStyle.Render("暂无请求日志"))
 	}
-	return clientBox("事件 / Events", strings.Join(lines, "\n"))
+	return clientBox("日志 / Logs", strings.Join(rows, "\n"))
+}
+
+// renderClientLogRow 使用固定列宽渲染客户端请求日志。
+func renderClientLogRow(values ...string) string {
+	widths := []int{10, 8, 28, 24}
+	parts := make([]string, 0, len(values))
+	for index, value := range values {
+		if index < len(widths) {
+			parts = append(parts, fixedClientCell(value, widths[index]))
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, " ")
+}
+
+// renderClientDuration 根据响应耗时突出显示异常缓慢的请求。
+func renderClientDuration(duration time.Duration) string {
+	value := duration.Round(time.Millisecond).String()
+	if duration >= time.Second {
+		return clientLogSlowStyle.Render(value)
+	}
+	return clientLogDurationStyle.Render(value)
 }
 
 // renderNavigation 以选中背景区分当前客户端页面。
 func (m *Model) renderNavigation() string {
-	labels := []string{"1:隧道", "2:状态", "3:事件"}
+	labels := []string{"1:隧道", "2:状态", "3:日志"}
 	items := make([]string, 0, len(labels))
 	for index, label := range labels {
 		if index == m.page {
@@ -270,23 +304,11 @@ func renderConnectionStatus(status string) string {
 }
 
 // renderEventLine 根据运行事件的严重程度显示颜色。
-func renderEventLine(line, message string) string {
-	lower := strings.ToLower(message)
-	switch {
-	case strings.Contains(lower, "failed"), strings.Contains(lower, "error"), strings.Contains(message, "断开"):
-		return clientEventErrorStyle.Render(line)
-	case strings.Contains(lower, "connecting"), strings.Contains(lower, "change"), strings.Contains(message, "重连"):
-		return clientEventWarnStyle.Render(line)
-	default:
-		return clientEventInfoStyle.Render(line)
-	}
-}
-
 func (m *Model) help() string {
 	if m.page == 0 {
-		return "↑↓:选择  space:启动/停止  d:移除  m:服务端模式  ←→:切换页面  q:退出"
+		return "↑↓:选择  space:启动/停止  d:移除  m:服务端模式  ←→:切换页面  q:退出\n" + clientGitHubStyle.Render(githubRepositoryURL)
 	}
-	return "←→:切换页面  q:退出"
+	return "←→:切换页面  q:退出\n" + clientGitHubStyle.Render(githubRepositoryURL)
 }
 
 func (m *Model) toggleSelected() {
@@ -386,15 +408,19 @@ var (
 	clientTableHeaderStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBD5E1"))
 	clientSelectedRowStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ECFEFF")).Background(clientSelectColor)
 	clientEnabledStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
-	clientDisabledStyle     = lipgloss.NewStyle().Foreground(clientMutedColor)
+	clientDisabledStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
 	clientConnectedStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC"))
 	clientConnectingStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FDE68A"))
 	clientDisconnectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FCA5A5"))
 	clientRateStyle         = lipgloss.NewStyle().Foreground(clientPrimaryColor)
 	clientMetricStyle       = lipgloss.NewStyle().Bold(true).Foreground(clientPrimaryColor)
 	clientMutedStyle        = lipgloss.NewStyle().Foreground(clientMutedColor)
-	clientEventInfoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A7F3D0"))
-	clientEventWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A"))
-	clientEventErrorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
+	clientLogTimeStyle      = lipgloss.NewStyle().Foreground(clientMutedColor)
+	clientLogMethodStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC"))
+	clientLogAddressStyle   = lipgloss.NewStyle().Foreground(clientPrimaryColor)
+	clientLogTargetStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4B5FD"))
+	clientLogDurationStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#A7F3D0"))
+	clientLogSlowStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FDE68A"))
+	clientGitHubStyle       = lipgloss.NewStyle().Foreground(clientMutedColor)
 	clientErrorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Bold(true)
 )

@@ -423,11 +423,17 @@ func (a *App) handleDirectHTTPRequest(writer http.ResponseWriter, request *http.
 
 // forwardHTTPRequest 通过给定 HTTP 规则将完整请求和响应传输到客户端。
 func (a *App) forwardHTTPRequest(writer http.ResponseWriter, request *http.Request, rule config.Connection) {
+	startedAt := time.Now()
+	statusCode := http.StatusBadGateway
+	defer func() {
+		a.logger.Info("http request completed", "method", request.Method, "address", request.Host+request.URL.RequestURI(), "target", rule.Target, "status", statusCode, "duration", time.Since(startedAt).Round(time.Millisecond))
+	}()
 	serverConn, proxyConn := net.Pipe()
 	defer proxyConn.Close()
 	streamID, tc, err := a.openHTTPStream(rule.ID, serverConn)
 	if err != nil {
 		serverConn.Close()
+		statusCode = http.StatusBadGateway
 		http.Error(writer, "tunnel unavailable", http.StatusBadGateway)
 		return
 	}
@@ -443,17 +449,20 @@ func (a *App) forwardHTTPRequest(writer http.ResponseWriter, request *http.Reque
 	}
 	if err := forwarded.Write(proxyConn); err != nil {
 		a.logger.Warn("write http request to tunnel failed", "conn_id", rule.ID, "err", err)
+		statusCode = http.StatusBadGateway
 		http.Error(writer, "tunnel request failed", http.StatusBadGateway)
 		return
 	}
 	response, err := http.ReadResponse(bufio.NewReader(proxyConn), forwarded)
 	if err != nil {
 		a.logger.Warn("read http response from tunnel failed", "conn_id", rule.ID, "err", err)
+		statusCode = http.StatusBadGateway
 		http.Error(writer, "tunnel response failed", http.StatusBadGateway)
 		return
 	}
 	defer response.Body.Close()
 	copyHTTPHeaders(writer.Header(), response.Header)
+	statusCode = response.StatusCode
 	writer.WriteHeader(response.StatusCode)
 	if _, err := io.Copy(writer, response.Body); err != nil {
 		a.logger.Debug("write http response failed", "conn_id", rule.ID, "err", err)

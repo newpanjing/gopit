@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -39,6 +40,8 @@ const (
 )
 
 var pageNames = [numPages]string{"隧道", "状态", "日志", "设置"}
+
+const githubRepositoryURL = "github.com/newpanjing/gopit"
 
 type mode int
 
@@ -338,28 +341,28 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "tab":
-		m.page = (m.page + 1) % numPages
+		m.setPage((m.page + 1) % numPages)
 		return m, nil
 	case "shift+tab":
-		m.page = (m.page - 1 + numPages) % numPages
+		m.setPage((m.page - 1 + numPages) % numPages)
 		return m, nil
 	case "left":
-		m.page = (m.page - 1 + numPages) % numPages
+		m.setPage((m.page - 1 + numPages) % numPages)
 		return m, nil
 	case "right":
-		m.page = (m.page + 1) % numPages
+		m.setPage((m.page + 1) % numPages)
 		return m, nil
 	case "1":
-		m.page = pageConnections
+		m.setPage(pageConnections)
 		return m, nil
 	case "2":
-		m.page = pageStatus
+		m.setPage(pageStatus)
 		return m, nil
 	case "3":
-		m.page = pageLogs
+		m.setPage(pageLogs)
 		return m, nil
 	case "4":
-		m.page = pageSettings
+		m.setPage(pageSettings)
 		return m, nil
 	case "up", "k":
 		m.moveCursor(-1)
@@ -380,6 +383,14 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsKey(msg)
 	}
 	return m, nil
+}
+
+// setPage 切换页面，并且仅在进入日志页时读取后台日志文件。
+func (m *Model) setPage(value page) {
+	m.page = value
+	if value == pageLogs {
+		m.refreshLogLines()
+	}
 }
 
 func (m *Model) handleConnectionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -997,7 +1008,9 @@ func (m *Model) isConnectionOnline(connID string) bool {
 }
 
 func (m *Model) refresh() {
-	m.refreshLogLines()
+	if m.page == pageLogs {
+		m.refreshLogLines()
+	}
 	if !m.attached {
 		m.stats = m.app.GetStats()
 		m.onlineClients = m.app.GetOnlineClients()
@@ -1026,7 +1039,7 @@ func (m *Model) refresh() {
 // --- rendering ----------------------------------------------------------
 
 func (m *Model) renderTitle() string {
-	title := titleStyle.Render("◉ GoPit Server") + versionStyle.Render("v"+m.appVersion)
+	title := titleStyle.Render("◉ GoPit Server") + versionStyle.Render("v"+strings.TrimPrefix(m.appVersion, "v"))
 
 	var tabs []string
 	for i, name := range pageNames {
@@ -1051,7 +1064,7 @@ func (m *Model) renderStatus() string {
 	case pageSettings:
 		hints = "e:编辑  |  " + hints
 	}
-	return statusBarStyle.Render(hints)
+	return lipgloss.JoinVertical(lipgloss.Left, statusBarStyle.Render(hints), githubStyle.Render(githubRepositoryURL))
 }
 
 func (m *Model) renderError() string {
@@ -1087,9 +1100,9 @@ func (m *Model) renderConnections() string {
 	)
 	rows := make([][]string, 0, len(cfg.Connections))
 	for _, c := range cfg.Connections {
-		enabled := "no"
+		enabled := disabledTunnelStyle.Render("✗")
 		if c.Enabled {
-			enabled = "yes"
+			enabled = enabledTunnelStyle.Render("✓")
 		}
 		status := "offline"
 		if m.isConnectionOnline(c.ID) {
@@ -1183,17 +1196,18 @@ func (m *Model) renderStatusPage() string {
 }
 
 func (m *Model) renderLogs() string {
-	var body string
-	if len(m.logLines) == 0 {
-		body = lipgloss.NewStyle().Foreground(mutedColor).Render("(暂无日志 / no logs yet)")
-	} else {
-		lines := make([]string, 0, len(m.logLines))
-		for _, line := range m.logLines {
-			lines = append(lines, renderLogLine(line))
+	lines := []string{headerStyle.Render(renderRequestLogRow("Time", "Method", "Address", "Response Time"))}
+	for _, line := range m.logLines {
+		entry, ok := parseRequestLogLine(line)
+		if !ok {
+			continue
 		}
-		body = strings.Join(lines, "\n")
+		lines = append(lines, renderRequestLogEntry(entry))
 	}
-	return sectionBox("日志输出 / Logs", body)
+	if len(lines) == 1 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(mutedColor).Render("暂无请求日志 / no request logs yet"))
+	}
+	return sectionBox("日志 / Logs", strings.Join(lines, "\n"))
 }
 
 func (m *Model) renderSettings() string {
@@ -1408,18 +1422,100 @@ func (m *Model) refreshLogLines() {
 	m.logLines = lines
 }
 
-// renderLogLine 按日志级别突出显示服务端事件。
-func renderLogLine(line string) string {
-	switch {
-	case strings.Contains(line, "level=ERROR"):
-		return logErrorStyle.Render(line)
-	case strings.Contains(line, "level=WARN"):
-		return logWarnStyle.Render(line)
-	case strings.Contains(line, "level=INFO"):
-		return logInfoStyle.Render(line)
-	default:
-		return logDebugStyle.Render(line)
+// requestLogEntry 是服务端 HTTP 转发完成后的日志展示数据。
+type requestLogEntry struct {
+	Time     time.Time
+	Method   string
+	Address  string
+	Status   int
+	Duration string
+}
+
+// parseRequestLogLine 从结构化 slog 输出中解析 HTTP 请求完成记录。
+func parseRequestLogLine(line string) (requestLogEntry, bool) {
+	if !strings.Contains(line, `msg="http request completed"`) {
+		return requestLogEntry{}, false
 	}
+	timestamp, err := time.Parse(time.RFC3339Nano, slogField(line, "time"))
+	if err != nil {
+		return requestLogEntry{}, false
+	}
+	status, err := strconv.Atoi(slogField(line, "status"))
+	if err != nil {
+		return requestLogEntry{}, false
+	}
+	return requestLogEntry{
+		Time:     timestamp,
+		Method:   slogField(line, "method"),
+		Address:  slogField(line, "address"),
+		Status:   status,
+		Duration: slogField(line, "duration"),
+	}, true
+}
+
+// slogField 读取 slog 文本处理器输出中的单个键值字段。
+func slogField(line, key string) string {
+	prefix := key + "="
+	index := strings.Index(line, prefix)
+	if index < 0 {
+		return ""
+	}
+	value := line[index+len(prefix):]
+	if strings.HasPrefix(value, `"`) {
+		end := strings.Index(value[1:], `"`)
+		if end >= 0 {
+			return value[1 : end+1]
+		}
+	}
+	if end := strings.IndexByte(value, ' '); end >= 0 {
+		return value[:end]
+	}
+	return value
+}
+
+// renderRequestLogRow 使用稳定列宽保证服务端日志字段对齐。
+func renderRequestLogRow(values ...string) string {
+	widths := []int{10, 8, 42}
+	parts := make([]string, 0, len(values))
+	for index, value := range values {
+		if index < len(widths) {
+			parts = append(parts, logCell(value, widths[index]))
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return strings.Join(parts, " ")
+}
+
+// logCell 按终端显示宽度补齐日志单元格，防止颜色代码影响对齐。
+func logCell(value string, width int) string {
+	padding := width - lipgloss.Width(value)
+	if padding <= 0 {
+		return value
+	}
+	return value + strings.Repeat(" ", padding)
+}
+
+// renderRequestLogEntry 按状态码和请求字段为服务端请求日志着色。
+func renderRequestLogEntry(entry requestLogEntry) string {
+	durationStyle := logInfoStyle
+	if entry.Status >= http.StatusInternalServerError {
+		durationStyle = logErrorStyle
+	} else if entry.Status >= http.StatusBadRequest || isSlowRequest(entry.Duration) {
+		durationStyle = logWarnStyle
+	}
+	return renderRequestLogRow(
+		logTimeStyle.Render(logCell(entry.Time.Format("15:04:05"), 10)),
+		logMethodStyle.Render(logCell(entry.Method, 8)),
+		logAddressStyle.Render(logCell(truncate(entry.Address, 42), 42)),
+		durationStyle.Render(entry.Duration),
+	)
+}
+
+// isSlowRequest 判断结构化日志中的响应耗时是否达到告警阈值。
+func isSlowRequest(value string) bool {
+	duration, err := time.ParseDuration(value)
+	return err == nil && duration >= time.Second
 }
 
 // generateID returns a random hex id with the given prefix.
@@ -1550,8 +1646,14 @@ var (
 				Background(panelColor).
 				Padding(0, 2)
 
-	logInfoStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
-	logWarnStyle  = lipgloss.NewStyle().Foreground(warnColor)
-	logErrorStyle = lipgloss.NewStyle().Foreground(errColor).Bold(true)
-	logDebugStyle = lipgloss.NewStyle().Foreground(mutedColor)
+	logInfoStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
+	logWarnStyle        = lipgloss.NewStyle().Foreground(warnColor)
+	logErrorStyle       = lipgloss.NewStyle().Foreground(errColor).Bold(true)
+	logDebugStyle       = lipgloss.NewStyle().Foreground(mutedColor)
+	logTimeStyle        = lipgloss.NewStyle().Foreground(mutedColor)
+	logMethodStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC"))
+	logAddressStyle     = lipgloss.NewStyle().Foreground(primaryColor)
+	githubStyle         = lipgloss.NewStyle().Foreground(mutedColor).Padding(0, 1)
+	enabledTunnelStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#86EFAC"))
+	disabledTunnelStyle = lipgloss.NewStyle().Bold(true).Foreground(errColor)
 )

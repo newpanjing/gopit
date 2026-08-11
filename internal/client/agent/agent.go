@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -35,16 +38,27 @@ type StatusInfo struct {
 
 // EventInfo 是客户端隧道的完整运行事件，供后台管理器记录与展示。
 type EventInfo struct {
-	Time    time.Time
-	Message string
+	Time     time.Time
+	Message  string
+	Method   string
+	Address  string
+	Target   string
+	Duration time.Duration
 }
 
 // streamConn 管理单个数据流的双向转发。
 type streamConn struct {
-	localConn net.Conn
-	tc        *tunnel.TunnelConn
-	streamID  uint32
-	done      chan struct{}
+	localConn     net.Conn
+	tc            *tunnel.TunnelConn
+	streamID      uint32
+	done          chan struct{}
+	startedAt     time.Time
+	target        string
+	publicAddress string
+	mu            sync.Mutex
+	requestData   []byte
+	method        string
+	address       string
 }
 
 // Agent 管理客户端到服务端的隧道连接。
@@ -60,6 +74,7 @@ type Agent struct {
 	connectionID  string
 	name          string
 	target        string
+	publicAddress string
 	configVersion int64
 	lastHeartbeat time.Time
 
@@ -325,11 +340,17 @@ func (a *Agent) handleData(df *protocol.DataFrame, tc *tunnel.TunnelConn) {
 			return
 		}
 
+		a.mu.RLock()
+		publicAddress := a.publicAddress
+		a.mu.RUnlock()
 		sc := &streamConn{
-			localConn: localConn,
-			tc:        tc,
-			streamID:  df.StreamID,
-			done:      make(chan struct{}),
+			localConn:     localConn,
+			tc:            tc,
+			streamID:      df.StreamID,
+			done:          make(chan struct{}),
+			startedAt:     time.Now(),
+			target:        resolvedTarget,
+			publicAddress: publicAddress,
 		}
 
 		a.streams.Store(df.StreamID, sc)
@@ -349,6 +370,7 @@ func (a *Agent) handleData(df *protocol.DataFrame, tc *tunnel.TunnelConn) {
 		}
 		sc := v.(*streamConn)
 		if len(df.Data) > 0 {
+			sc.captureRequest(df.Data)
 			sc.localConn.Write(df.Data)
 		}
 
@@ -360,7 +382,7 @@ func (a *Agent) handleData(df *protocol.DataFrame, tc *tunnel.TunnelConn) {
 			a.streams.Delete(df.StreamID)
 			tc.DecActiveStream()
 			a.logger.Info("forwarding request closed", "stream_id", df.StreamID)
-			a.notifyEvent(fmt.Sprintf("forwarding request closed, stream=%d", df.StreamID))
+			a.notifyRequest(sc)
 		}
 
 	case protocol.DataHalfClose:
@@ -409,7 +431,55 @@ func (a *Agent) applyRoutes(routes []protocol.RouteEntry, version int64) {
 	for _, r := range routes {
 		a.name = r.Name
 		a.target = r.Target
+		a.publicAddress = r.Host
 		break // 只有一个 target
+	}
+}
+
+// captureRequest 从进入客户端的首段 HTTP 数据中解析请求方法和地址。
+func (s *streamConn) captureRequest(data []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.method != "" || len(s.requestData) >= 16*1024 {
+		return
+	}
+	s.requestData = append(s.requestData, data...)
+	request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(s.requestData)))
+	if err != nil {
+		return
+	}
+	s.method = request.Method
+	address := s.publicAddress
+	if address == "" {
+		address = request.Host
+	}
+	if address != "" {
+		address += request.URL.RequestURI()
+	} else {
+		address = request.URL.RequestURI()
+	}
+	s.address = address
+	s.requestData = nil
+}
+
+// requestLog 返回本地转发完成时供管理器展示的请求记录。
+func (s *streamConn) requestLog() EventInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return EventInfo{
+		Time:     time.Now(),
+		Message:  "forwarding request completed",
+		Method:   s.method,
+		Address:  s.address,
+		Target:   s.target,
+		Duration: time.Since(s.startedAt),
+	}
+}
+
+// notifyRequest 将完整请求转发记录发送给客户端管理器。
+func (a *Agent) notifyRequest(stream *streamConn) {
+	if a.OnEvent != nil {
+		a.OnEvent(stream.requestLog())
 	}
 }
 

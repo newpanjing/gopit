@@ -28,9 +28,13 @@ type TunnelStatus struct {
 
 // Event 是客户端运行过程中的可查看事件。
 type Event struct {
-	Time     time.Time `json:"time"`
-	TunnelID string    `json:"tunnel_id"`
-	Message  string    `json:"message"`
+	Time     time.Time     `json:"time"`
+	TunnelID string        `json:"tunnel_id"`
+	Message  string        `json:"message"`
+	Method   string        `json:"method,omitempty"`
+	Address  string        `json:"address,omitempty"`
+	Target   string        `json:"target,omitempty"`
+	Duration time.Duration `json:"duration,omitempty"`
 }
 
 // Snapshot 是客户端后台管理器的实时快照。
@@ -155,7 +159,7 @@ func (m *Manager) startTunnel(item config.ClientTunnel) {
 	cfg := config.ClientConfig{Server: config.ServerRef{Address: item.Server}, Auth: config.AuthRef{Token: item.Token}}
 	a := agent.New(cfg, m.configPath, m.logger, m.tunnelCfg)
 	a.OnStatusChange = func(info agent.StatusInfo) { m.addEvent(item.ID, statusMessage(info)) }
-	a.OnEvent = func(event agent.EventInfo) { m.addEventAt(item.ID, event.Time, event.Message) }
+	a.OnEvent = func(event agent.EventInfo) { m.addAgentEvent(item.ID, event) }
 	m.mu.Lock()
 	m.running[item.ID] = runningTunnel{definition: item, agent: a}
 	m.mu.Unlock()
@@ -193,9 +197,18 @@ func (m *Manager) addEvent(id, message string) {
 }
 
 func (m *Manager) addEventAt(id string, eventTime time.Time, message string) {
+	m.addEventRecord(Event{Time: eventTime, TunnelID: id, Message: message})
+}
+
+// addAgentEvent 保留客户端 Agent 上报的请求字段，供日志页按列展示。
+func (m *Manager) addAgentEvent(id string, event agent.EventInfo) {
+	m.addEventRecord(Event{Time: event.Time, TunnelID: id, Message: event.Message, Method: event.Method, Address: event.Address, Target: event.Target, Duration: event.Duration})
+}
+
+func (m *Manager) addEventRecord(event Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.events = append(m.events, Event{Time: eventTime, TunnelID: id, Message: message})
+	m.events = append(m.events, event)
 	if len(m.events) > maxEvents {
 		m.events = append([]Event(nil), m.events[len(m.events)-maxEvents:]...)
 	}
