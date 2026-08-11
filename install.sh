@@ -38,8 +38,7 @@ detect_platform() {
 
 download_and_install() {
   require_command curl
-  detect_repository
-  detect_platform
+	detect_platform
   local binary="${PROGRAM_NAME}"
   if [[ "${OS}" == "windows" ]]; then binary="${PROGRAM_NAME}.exe"; fi
   local asset="${PROGRAM_NAME}_${OS}_${ARCH}"
