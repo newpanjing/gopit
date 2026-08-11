@@ -1052,11 +1052,15 @@ func (m *Model) renderPage() string {
 
 func (m *Model) renderConnections() string {
 	cfg := m.store.Get()
+	httpsListen := "disabled"
+	if cfg.TLS.Enabled {
+		httpsListen = formatListenAddress(cfg.Server.HTTPSListen)
+	}
 	serverSummary := fmt.Sprintf(
 		"隧道端口 / Tunnel     %s\nWeb HTTP              %s\nWeb HTTPS             %s\n在线客户端 / Online   %d",
 		formatListenAddress(cfg.Server.TunnelListen),
 		formatListenAddress(cfg.Server.HTTPListen),
-		formatListenAddress(cfg.Server.HTTPSListen),
+		httpsListen,
 		m.stats.OnlineConnections,
 	)
 	rows := make([][]string, 0, len(cfg.Connections))

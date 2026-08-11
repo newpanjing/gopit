@@ -19,8 +19,9 @@ const (
 	argonSaltLength  = 16
 	argonKeyLength   = 32
 
-	// Token 长度（字节数，hex 编码后 64 字符）
-	tokenBytes = 32
+	// Token 长度（16 随机字节经 URL 安全 Base64 编码后为 22 个字符）。
+	// 128 位随机强度足以抵御在线猜测，同时比旧版 64 字符 Token 更便于输入。
+	tokenBytes = 16
 )
 
 // GenerateToken 生成高强度的随机 Token 明文。
@@ -29,7 +30,7 @@ func GenerateToken() (string, error) {
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate token: %w", err)
 	}
-	return hex.EncodeToString(b), nil
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // GenerateClientID 生成客户端 ID。

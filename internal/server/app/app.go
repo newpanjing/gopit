@@ -1,12 +1,17 @@
 package app
 
 import (
+	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopit/internal/config"
@@ -76,8 +81,18 @@ type App struct {
 	portListeners  map[string]*portListener
 	tunnelListener net.Listener
 	tunnelListen   string
+	httpServer     *http.Server
+	httpListen     string
+	httpStreams    sync.Map // streamID -> *httpStream
+	httpNextStream atomic.Uint32
 	stopCh         chan struct{}
 	wg             sync.WaitGroup
+}
+
+// httpStream 保存 HTTP 请求对应的本地管道，响应数据通过隧道写入 serverConn。
+type httpStream struct {
+	serverConn net.Conn
+	tunnel     *tunnel.TunnelConn
 }
 
 // New 创建服务端 App。
@@ -110,10 +125,39 @@ func (a *App) Start() error {
 
 	// 启动已配置连接的端口监听
 	a.startPortListeners(cfg)
+	if err := a.startHTTPServer(cfg); err != nil {
+		a.Stop()
+		return err
+	}
 
 	a.wg.Add(1)
 	go a.acceptLoop(listener)
 
+	return nil
+}
+
+// startHTTPServer 启动真实 HTTP 访问入口；规则为空时仍返回 404，便于端口健康检查。
+func (a *App) startHTTPServer(cfg *config.ServerConfig) error {
+	if cfg.Server.HTTPListen == "" {
+		return nil
+	}
+	listener, err := net.Listen("tcp", cfg.Server.HTTPListen)
+	if err != nil {
+		return fmt.Errorf("http listen: %w", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(a.handleHTTPRequest)}
+	a.mu.Lock()
+	a.httpServer = server
+	a.httpListen = cfg.Server.HTTPListen
+	a.mu.Unlock()
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.logger.Info("http listener started", "addr", cfg.Server.HTTPListen)
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			a.logger.Error("http listener stopped unexpectedly", "err", serveErr)
+		}
+	}()
 	return nil
 }
 
@@ -290,6 +334,145 @@ func (a *App) handlePortConn(pl *portListener, conn net.Conn) {
 	}
 }
 
+// handleHTTPRequest 根据 Host 匹配 HTTP 规则，并通过隧道转发完整请求与响应。
+func (a *App) handleHTTPRequest(writer http.ResponseWriter, request *http.Request) {
+	rule, found := a.findHTTPConnection(request.Host)
+	if !found {
+		http.NotFound(writer, request)
+		return
+	}
+	serverConn, proxyConn := net.Pipe()
+	defer proxyConn.Close()
+	streamID, tc, err := a.openHTTPStream(rule.ID, serverConn)
+	if err != nil {
+		serverConn.Close()
+		http.Error(writer, "tunnel unavailable", http.StatusBadGateway)
+		return
+	}
+	go a.forwardHTTPStream(streamID, tc, serverConn)
+	defer func() {
+		_ = tc.WriteData(&protocol.DataFrame{MsgType: protocol.DataStreamClose, StreamID: streamID})
+		a.closeHTTPStream(streamID)
+	}()
+
+	forwarded := request.Clone(request.Context())
+	if !rule.ForwardHost {
+		forwarded.Host = rule.Target
+	}
+	if err := forwarded.Write(proxyConn); err != nil {
+		a.logger.Warn("write http request to tunnel failed", "conn_id", rule.ID, "err", err)
+		http.Error(writer, "tunnel request failed", http.StatusBadGateway)
+		return
+	}
+	response, err := http.ReadResponse(bufio.NewReader(proxyConn), forwarded)
+	if err != nil {
+		a.logger.Warn("read http response from tunnel failed", "conn_id", rule.ID, "err", err)
+		http.Error(writer, "tunnel response failed", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	copyHTTPHeaders(writer.Header(), response.Header)
+	writer.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(writer, response.Body); err != nil {
+		a.logger.Debug("write http response failed", "conn_id", rule.ID, "err", err)
+	}
+}
+
+// forwardHTTPStream 将 HTTP 服务端入口写入管道的请求字节发送给客户端隧道。
+func (a *App) forwardHTTPStream(streamID uint32, tc *tunnel.TunnelConn, serverConn net.Conn) {
+	buffer := make([]byte, 32*1024)
+	for {
+		count, readErr := serverConn.Read(buffer)
+		if count > 0 {
+			if writeErr := tc.WriteData(&protocol.DataFrame{
+				MsgType:  protocol.DataStreamData,
+				StreamID: streamID,
+				Data:     buffer[:count],
+			}); writeErr != nil {
+				a.logger.Debug("write http stream data failed", "stream_id", streamID, "err", writeErr)
+				return
+			}
+		}
+		if readErr != nil {
+			_ = tc.WriteData(&protocol.DataFrame{MsgType: protocol.DataStreamClose, StreamID: streamID})
+			return
+		}
+	}
+}
+
+// findHTTPConnection 使用请求域名匹配启用的 HTTP 规则，空 Host 规则作为兜底。
+func (a *App) findHTTPConnection(host string) (config.Connection, bool) {
+	requestHost := normalizeHTTPHost(host)
+	var fallback config.Connection
+	for _, connection := range a.store.Get().Connections {
+		if !connection.Enabled || connection.Type != config.ConnectionTypeHTTP {
+			continue
+		}
+		if connection.Host == "" {
+			fallback = connection
+			continue
+		}
+		if normalizeHTTPHost(connection.Host) == requestHost {
+			return connection, true
+		}
+	}
+	return fallback, fallback.ID != ""
+}
+
+func normalizeHTTPHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return host
+}
+
+func copyHTTPHeaders(destination, source http.Header) {
+	for name, values := range source {
+		if strings.EqualFold(name, "Transfer-Encoding") || strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
+}
+
+// openHTTPStream 选择在线客户端隧道并注册 HTTP 请求的响应回写管道。
+func (a *App) openHTTPStream(connID string, serverConn net.Conn) (uint32, *tunnel.TunnelConn, error) {
+	a.mu.RLock()
+	session := a.sessions[connID]
+	a.mu.RUnlock()
+	if session == nil || session.tunnelCount() == 0 {
+		return 0, nil, fmt.Errorf("no online tunnel")
+	}
+	session.mu.Lock()
+	if len(session.Tunnels) == 0 {
+		session.mu.Unlock()
+		return 0, nil, fmt.Errorf("no active tunnel")
+	}
+	tc := session.Tunnels[0]
+	session.mu.Unlock()
+	streamID := a.httpNextStream.Add(1)
+	a.httpStreams.Store(streamID, &httpStream{serverConn: serverConn, tunnel: tc})
+	tc.IncActiveStream()
+	if err := tc.WriteData(&protocol.DataFrame{MsgType: protocol.DataOpenStream, StreamID: streamID, Data: protocol.EncodeOpenStream(connID)}); err != nil {
+		a.httpStreams.Delete(streamID)
+		tc.DecActiveStream()
+		return 0, nil, err
+	}
+	return streamID, tc, nil
+}
+
+// closeHTTPStream 仅回收一次 HTTP 流及其活动流计数。
+func (a *App) closeHTTPStream(streamID uint32) {
+	if value, loaded := a.httpStreams.LoadAndDelete(streamID); loaded {
+		entry := value.(*httpStream)
+		_ = entry.serverConn.Close()
+		entry.tunnel.DecActiveStream()
+	}
+}
+
 // Stop 停止服务端应用。
 func (a *App) Stop() {
 	close(a.stopCh)
@@ -298,6 +481,12 @@ func (a *App) Stop() {
 	a.mu.RUnlock()
 	if tunnelListener != nil {
 		tunnelListener.Close()
+	}
+	a.mu.RLock()
+	httpServer := a.httpServer
+	a.mu.RUnlock()
+	if httpServer != nil {
+		httpServer.Close()
 	}
 
 	// 停止所有端口监听
@@ -439,7 +628,7 @@ func (a *App) handleData(df *protocol.DataFrame, tc *tunnel.TunnelConn) {
 	a.mu.RUnlock()
 
 	if !ok {
-		a.logger.Warn("data frame for unknown connection", "conn_id", connID)
+		a.handleHTTPStreamData(df)
 		return
 	}
 
@@ -471,6 +660,28 @@ func (a *App) handleData(df *protocol.DataFrame, tc *tunnel.TunnelConn) {
 			if tcpConn, ok := conn.(*net.TCPConn); ok {
 				tcpConn.CloseRead()
 			}
+		}
+	}
+}
+
+// handleHTTPStreamData 将客户端响应数据写入对应 HTTP 请求的管道。
+func (a *App) handleHTTPStreamData(df *protocol.DataFrame) {
+	value, ok := a.httpStreams.Load(df.StreamID)
+	if !ok {
+		a.logger.Warn("data frame for unknown stream", "stream_id", df.StreamID)
+		return
+	}
+	stream := value.(*httpStream)
+	switch df.MsgType {
+	case protocol.DataStreamData:
+		if len(df.Data) > 0 {
+			_, _ = stream.serverConn.Write(df.Data)
+		}
+	case protocol.DataStreamClose:
+		a.closeHTTPStream(df.StreamID)
+	case protocol.DataHalfClose:
+		if tcpConn, isTCP := stream.serverConn.(*net.TCPConn); isTCP {
+			_ = tcpConn.CloseRead()
 		}
 	}
 }
@@ -532,6 +743,9 @@ func (a *App) onConfigReloaded(newCfg *config.ServerConfig) {
 	if err := a.restartTunnelListener(newCfg); err != nil {
 		a.logger.Error("restart tunnel listener failed, keeping previous listener", "addr", newCfg.Server.TunnelListen, "err", err)
 	}
+	if err := a.restartHTTPServer(newCfg); err != nil {
+		a.logger.Error("restart http listener failed, keeping previous listener", "addr", newCfg.Server.HTTPListen, "err", err)
+	}
 
 	// 停止已删除或禁用的端口监听
 	a.mu.RLock()
@@ -577,6 +791,48 @@ func (a *App) onConfigReloaded(newCfg *config.ServerConfig) {
 	for _, id := range connIDs {
 		a.notifyClient(id)
 	}
+}
+
+// restartHTTPServer 在 HTTP 监听地址变更后先绑定新端口，再关闭旧入口。
+func (a *App) restartHTTPServer(cfg *config.ServerConfig) error {
+	a.mu.RLock()
+	currentAddress := a.httpListen
+	currentServer := a.httpServer
+	a.mu.RUnlock()
+	if currentAddress == cfg.Server.HTTPListen {
+		return nil
+	}
+	if cfg.Server.HTTPListen == "" {
+		if currentServer != nil {
+			_ = currentServer.Close()
+		}
+		a.mu.Lock()
+		a.httpServer = nil
+		a.httpListen = ""
+		a.mu.Unlock()
+		return nil
+	}
+	listener, err := net.Listen("tcp", cfg.Server.HTTPListen)
+	if err != nil {
+		return fmt.Errorf("http listen: %w", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(a.handleHTTPRequest)}
+	a.mu.Lock()
+	a.httpServer = server
+	a.httpListen = cfg.Server.HTTPListen
+	a.mu.Unlock()
+	if currentServer != nil {
+		_ = currentServer.Close()
+	}
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.logger.Info("http listener reloaded", "addr", cfg.Server.HTTPListen)
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			a.logger.Error("http listener stopped unexpectedly", "err", serveErr)
+		}
+	}()
+	return nil
 }
 
 // restartTunnelListener 在隧道监听地址变更后无中断切换新监听器。
