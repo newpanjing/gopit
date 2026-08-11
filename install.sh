@@ -37,7 +37,9 @@ detect_platform() {
 }
 
 download_and_install() {
-  require_command curl
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    fail "missing required command: curl or wget"
+  fi
 	detect_platform
   local binary="${PROGRAM_NAME}"
   if [[ "${OS}" == "windows" ]]; then binary="${PROGRAM_NAME}.exe"; fi
@@ -49,9 +51,19 @@ download_and_install() {
   # 将临时目录值在注册 trap 时展开，避免函数返回后局部变量触发 set -u。
   trap "rm -rf -- '${temporary_dir}'" EXIT
   printf 'Downloading %s\n' "${url}"
-  curl --ipv4 --fail --location --silent --show-error \
-    --connect-timeout 20 --max-time 300 --retry 5 --retry-delay 2 \
-    "${url}" -o "${temporary_dir}/${binary}"
+  downloaded=false
+  if command -v curl >/dev/null 2>&1; then
+    if curl --ipv4 --fail --location --silent --show-error \
+      --connect-timeout 20 --max-time 300 --retry 5 --retry-delay 2 \
+      "${url}" -o "${temporary_dir}/${binary}"; then
+      downloaded=true
+    fi
+  fi
+  if [[ "${downloaded}" != true ]] && command -v wget >/dev/null 2>&1; then
+    wget --inet4-only --timeout=20 --tries=5 --quiet \
+      --output-document="${temporary_dir}/${binary}" "${url}" && downloaded=true
+  fi
+  [[ "${downloaded}" == true ]] || fail "download failed; check GitHub network/TLS access"
   [[ -f "${temporary_dir}/${binary}" ]] || fail "release asset download failed"
   mkdir -p "${INSTALL_DIR}"
   cp "${temporary_dir}/${binary}" "${INSTALL_DIR}/${binary}"
