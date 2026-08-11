@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,22 @@ import (
 	"gopit/internal/server/configstore"
 	"gopit/internal/tunnel"
 )
+
+// TestTUITunnelTerminology 确保服务端规则列表统一使用“隧道”术语，且附加式界面不展示内部同步提示。
+func TestTUITunnelTerminology(t *testing.T) {
+	_, store, _ := newTestApp(t)
+	m := NewAttached(store, nil, func() (app.Stats, []app.OnlineClientInfo, error) {
+		return app.Stats{}, nil, nil
+	})
+
+	view := m.View()
+	if !strings.Contains(view, "隧道 / Tunnels") {
+		t.Fatalf("view missing tunnel title: %q", view)
+	}
+	if strings.Contains(view, "已附加后台服务") {
+		t.Fatalf("view contains internal attachment hint: %q", view)
+	}
+}
 
 func newTestApp(t *testing.T) (*app.App, *configstore.Store, string) {
 	t.Helper()

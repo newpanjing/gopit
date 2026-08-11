@@ -177,8 +177,13 @@ func (m *Manager) GetSnapshot() Snapshot {
 		if current, ok := m.running[item.ID]; ok {
 			status = current.agent.GetStatus()
 		}
+		// 客户端名称由服务端规则快照决定，本地仅保留隧道 ID 供管理器匹配。
+		displayName := status.Name
+		if displayName == "" {
+			displayName = "-"
+		}
 		sendRate, recvRate := m.rateFor(item.ID, status.BytesSent, status.BytesReceived)
-		result.Tunnels = append(result.Tunnels, TunnelStatus{ID: item.ID, Name: item.Name, Server: item.Server, Enabled: item.Enabled, Status: status, SendRate: sendRate, RecvRate: recvRate})
+		result.Tunnels = append(result.Tunnels, TunnelStatus{ID: item.ID, Name: displayName, Server: item.Server, Enabled: item.Enabled, Status: status, SendRate: sendRate, RecvRate: recvRate})
 	}
 	return result
 }

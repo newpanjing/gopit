@@ -143,18 +143,22 @@ func (m *Model) refresh() {
 
 func (m *Model) renderTunnels() string {
 	rows := make([]string, 0, len(m.snapshot.Tunnels)+1)
-	rows = append(rows, clientTableHeaderStyle.Render(fmt.Sprintf("%-20s %-24s %-9s %-12s %-8s %s", "Name", "Server", "Enabled", "Status", "Streams", "Rate")))
+	rows = append(rows, clientTableHeaderStyle.Render(fmt.Sprintf("%-18s %-22s %-22s %-9s %-12s %-8s %s", "Name", "Forward", "Server", "Enabled", "Status", "Streams", "Rate")))
 	for index, item := range m.snapshot.Tunnels {
 		name := item.Name
 		if name == "" {
-			name = item.ID
+			name = "-"
 		}
 		rate := fmt.Sprintf("↑%s/s ↓%s/s", bytes(item.SendRate), bytes(item.RecvRate))
 		enabled := clientDisabledStyle.Render("disabled")
 		if item.Enabled {
 			enabled = clientEnabledStyle.Render("enabled")
 		}
-		line := fmt.Sprintf("%-20s %-24s %-9s %-12s %-8d %s", trim(name, 20), trim(item.Server, 24), enabled, renderConnectionStatus(item.Status.Status), item.Status.ActiveStreams, clientRateStyle.Render(rate))
+		target := item.Status.Target
+		if target == "" {
+			target = "-"
+		}
+		line := fmt.Sprintf("%-18s %-22s %-22s %-9s %-12s %-8d %s", trim(name, 18), trim(target, 22), trim(item.Server, 22), enabled, renderConnectionStatus(item.Status.Status), item.Status.ActiveStreams, clientRateStyle.Render(rate))
 		if index == m.cursor {
 			line = clientSelectedRowStyle.Render("▸ " + line)
 		} else {

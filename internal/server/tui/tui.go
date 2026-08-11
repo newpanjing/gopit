@@ -38,7 +38,7 @@ const (
 	numPages
 )
 
-var pageNames = [numPages]string{"连接", "状态", "日志", "设置"}
+var pageNames = [numPages]string{"隧道", "状态", "日志", "设置"}
 
 type mode int
 
@@ -1043,12 +1043,9 @@ func (m *Model) renderTitle() string {
 
 func (m *Model) renderStatus() string {
 	hints := "←→:切换页面  Tab/Shift+Tab:切换  1-4:跳转  ↑↓/jk:导航  q:退出"
-	if m.attached {
-		hints = "已附加后台服务，配置约100ms内推送并重载  |  " + hints
-	}
 	switch m.page {
 	case pageConnections:
-		hints = "a:新建  e:编辑  t:查看Token  r:重置Token  d:删除  space:启用/禁用  m:客户端模式  |  " + hints
+		hints = "a:新建隧道  e:编辑  t:查看Token  r:重置Token  d:删除  space:启用/禁用  m:客户端模式  |  " + hints
 	case pageStatus:
 		hints = "↑↓:选择连接  Enter:切换详情  |  " + hints
 	case pageSettings:
@@ -1116,18 +1113,18 @@ func (m *Model) renderConnections() string {
 			status,
 		})
 	}
-	connections := sectionBox("连接 / Connections", renderTable(
+	tunnels := sectionBox("隧道 / Tunnels", renderTable(
 		[]string{"Type", "Name", "Host", "Port", "Target", "Enabled", "Status"},
 		rows,
 		m.cursor[pageConnections],
-		"暂无连接，按 a 新建。/ No connections. Press 'a' to create one.",
+		"暂无隧道，按 a 新建。/ No tunnels. Press 'a' to create one.",
 	))
-	return lipgloss.JoinVertical(lipgloss.Left, sectionBox("服务端 / Server", serverSummary), "", connections)
+	return lipgloss.JoinVertical(lipgloss.Left, sectionBox("服务端 / Server", serverSummary), "", tunnels)
 }
 
 func (m *Model) renderStatusPage() string {
 	statsLines := fmt.Sprintf(
-		"Online Connections  %d\nTotal Connections    %d\nActive Tunnels       %d\nActive Streams       %d\nBytes Sent           %s\nBytes Received       %s",
+		"Online Clients      %d\nTotal Tunnels       %d\nActive Tunnels      %d\nActive Streams      %d\nBytes Sent          %s\nBytes Received      %s",
 		m.stats.OnlineConnections, m.stats.TotalConnections, m.stats.ActiveTunnels,
 		m.stats.ActiveStreams, formatBytes(m.stats.BytesSent), formatBytes(m.stats.BytesReceived),
 	)

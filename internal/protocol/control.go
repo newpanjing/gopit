@@ -49,6 +49,7 @@ type ClientInfo struct {
 // RouteEntry 是规则快照中的单条规则。
 type RouteEntry struct {
 	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
 	Protocol    string `json:"protocol"` // "http" 或 "tcp"
 	Host        string `json:"host,omitempty"`
 	ForwardHost bool   `json:"forward_host,omitempty"`

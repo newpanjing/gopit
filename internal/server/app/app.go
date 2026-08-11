@@ -779,6 +779,7 @@ func (a *App) sendRulesSnapshot(tc *tunnel.TunnelConn, connID string) {
 		if c.ID == connID && c.Enabled {
 			routes = append(routes, protocol.RouteEntry{
 				ID:          c.ID,
+				Name:        c.Name,
 				Protocol:    c.Type,
 				Host:        c.Host,
 				ForwardHost: c.ForwardHost,

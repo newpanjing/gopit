@@ -24,6 +24,7 @@ type StatusInfo struct {
 	ConnectedAt   time.Time
 	LastHeartbeat time.Time
 	Error         string
+	Name          string
 	Target        string
 	ConfigVersion int64
 	BytesSent     int64
@@ -57,6 +58,7 @@ type Agent struct {
 	tunnel        *tunnel.TunnelConn
 	connected     atomic.Bool
 	connectionID  string
+	name          string
 	target        string
 	configVersion int64
 	lastHeartbeat time.Time
@@ -405,6 +407,7 @@ func (a *Agent) applyRoutes(routes []protocol.RouteEntry, version int64) {
 
 	a.configVersion = version
 	for _, r := range routes {
+		a.name = r.Name
 		a.target = r.Target
 		break // 只有一个 target
 	}
@@ -419,6 +422,7 @@ func (a *Agent) GetStatus() StatusInfo {
 		ConnectionID:  a.connectionID,
 		RemoteAddr:    a.cfg.Server.Address,
 		LastHeartbeat: a.lastHeartbeat,
+		Name:          a.name,
 		Target:        a.target,
 		ConfigVersion: a.configVersion,
 	}
