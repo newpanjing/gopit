@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build archive
+      - name: Build executable
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -41,16 +41,11 @@ jobs:
         run: |
           set -eu
           asset="pit_${GOOS}_${GOARCH}"
-          mkdir -p "dist/${asset}"
+          mkdir -p dist
           binary="pit"
           if [ "${GOOS}" = "windows" ]; then binary="pit.exe"; fi
-          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${asset}/${binary}" ./cmd/pit
-          if [ "${GOOS}" = "windows" ]; then
-            zip -j "dist/${asset}.zip" "dist/${asset}/${binary}"
-          else
-            tar -C dist -czf "dist/${asset}.tar.gz" "${asset}"
-          fi
-          rm -rf "dist/${asset}"
+          if [ "${GOOS}" = "windows" ]; then asset="${asset}.exe"; fi
+          CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${asset}" ./cmd/pit
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -66,7 +61,7 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
-      - name: Create release and upload archives
+      - name: Create release and upload executables
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}

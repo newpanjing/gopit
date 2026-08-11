@@ -12,9 +12,9 @@ VERSION="latest"
 usage() {
   cat <<'EOF'
 Usage:
-  instal.sh install [--repo owner/repo] [--dir path] [--version tag]
-  instal.sh upgrade [--repo owner/repo] [--dir path] [--version tag]
-  instal.sh run [--repo owner/repo] [--dir path] [tunnel arguments...]
+  install.sh install [--repo owner/repo] [--dir path] [--version tag]
+  install.sh upgrade [--repo owner/repo] [--dir path] [--version tag]
+  install.sh run [--repo owner/repo] [--dir path] [pit arguments...]
 
 The repository is resolved from --repo, GOPIT_REPOSITORY, or the current Git
 remote. For a curl download, set GOPIT_REPOSITORY=owner/repo.
@@ -42,6 +42,7 @@ detect_platform() {
   case "$(uname -s)" in
     Darwin) OS="darwin" ;;
     Linux) OS="linux" ;;
+    MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
     *) fail "unsupported operating system: $(uname -s)" ;;
   esac
   case "$(uname -m)" in
@@ -53,10 +54,12 @@ detect_platform() {
 
 download_and_install() {
   require_command curl
-  require_command tar
   detect_repository
   detect_platform
-  local asset="${PROGRAM_NAME}_${OS}_${ARCH}.tar.gz"
+  local binary="${PROGRAM_NAME}"
+  if [[ "${OS}" == "windows" ]]; then binary="${PROGRAM_NAME}.exe"; fi
+  local asset="${PROGRAM_NAME}_${OS}_${ARCH}"
+  if [[ "${OS}" == "windows" ]]; then asset="${asset}.exe"; fi
   local release_path="latest/download"
   if [[ "${VERSION}" != "latest" ]]; then release_path="download/${VERSION}"; fi
   local url="https://github.com/${REPOSITORY}/releases/${release_path}/${asset}"
@@ -64,12 +67,12 @@ download_and_install() {
   temporary_dir="$(mktemp -d)"
   trap 'rm -rf "${temporary_dir}"' EXIT
   printf 'Downloading %s\n' "${url}"
-  curl --fail --location --silent --show-error "${url}" -o "${temporary_dir}/${asset}"
-  tar -xzf "${temporary_dir}/${asset}" -C "${temporary_dir}"
-  [[ -f "${temporary_dir}/${PROGRAM_NAME}_${OS}_${ARCH}/${PROGRAM_NAME}" ]] || fail "release archive has an unexpected layout"
+  curl --fail --location --silent --show-error "${url}" -o "${temporary_dir}/${binary}"
+  [[ -f "${temporary_dir}/${binary}" ]] || fail "release asset download failed"
   mkdir -p "${INSTALL_DIR}"
-  install -m 0755 "${temporary_dir}/${PROGRAM_NAME}_${OS}_${ARCH}/${PROGRAM_NAME}" "${INSTALL_DIR}/${PROGRAM_NAME}"
-  printf 'Installed %s to %s\n' "${PROGRAM_NAME}" "${INSTALL_DIR}/${PROGRAM_NAME}"
+  cp "${temporary_dir}/${binary}" "${INSTALL_DIR}/${binary}"
+  chmod 0755 "${INSTALL_DIR}/${binary}"
+  printf 'Installed %s to %s\n' "${PROGRAM_NAME}" "${INSTALL_DIR}/${binary}"
   case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *) printf 'Add %s to PATH to invoke %s directly.\n' "${INSTALL_DIR}" "${PROGRAM_NAME}" ;;
@@ -90,7 +93,9 @@ done
 case "${COMMAND}" in
   install|upgrade) download_and_install ;;
   run)
-    if [[ ! -x "${INSTALL_DIR}/${PROGRAM_NAME}" ]]; then download_and_install; fi
-    exec "${INSTALL_DIR}/${PROGRAM_NAME}" "$@"
+    run_binary="${PROGRAM_NAME}"
+    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then run_binary="${PROGRAM_NAME}.exe"; fi
+    if [[ ! -x "${INSTALL_DIR}/${run_binary}" ]]; then download_and_install; fi
+    exec "${INSTALL_DIR}/${run_binary}" "$@"
     ;;
 esac

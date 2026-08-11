@@ -4,24 +4,24 @@
 
 ## 安装
 
-发布版本支持 macOS、Linux 与 Windows 的 `amd64`、`arm64` 架构。安装脚本支持 macOS/Linux，会自动识别系统与架构并下载对应资产到 `~/.local/bin/pit`；Windows 请从 GitHub Release 下载 `pit_windows_amd64.zip` 或 `pit_windows_arm64.zip` 后解压使用。
+发布版本为每个 macOS、Linux、Windows 的 `amd64`、`arm64` 架构提供单独可下载的可执行文件。`install.sh` 会自动识别系统和架构，下载最新匹配版本到 `~/.local/bin`。
 
 在源码目录内执行时，脚本会尝试从 Git remote 读取仓库地址：
 
 ```bash
-./instal.sh install
+./install.sh install
 ```
 
 通过 curl 下载脚本或当前目录没有 Git remote 时，指定 GitHub 仓库：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/instal.sh | bash -s -- install --repo OWNER/REPOSITORY
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/install.sh | bash -s -- install --repo OWNER/REPOSITORY
 ```
 
 也可使用环境变量：
 
 ```bash
-GOPIT_REPOSITORY=OWNER/REPOSITORY ./instal.sh install
+GOPIT_REPOSITORY=OWNER/REPOSITORY ./install.sh install
 ```
 
 首次安装后，确保 `~/.local/bin` 在 `PATH` 中：
@@ -35,13 +35,13 @@ export PATH="$HOME/.local/bin:$PATH"
 升级会下载最新 Release 并替换本地二进制：
 
 ```bash
-./instal.sh upgrade --repo OWNER/REPOSITORY
+./install.sh upgrade --repo OWNER/REPOSITORY
 ```
 
 安装指定版本：
 
 ```bash
-./instal.sh install --repo OWNER/REPOSITORY --version v1.0.0
+./install.sh install --repo OWNER/REPOSITORY --version v1.0.0
 ```
 
 ## 运行
@@ -57,7 +57,7 @@ pit join <token> -s <server>
 也可以让脚本在本地不存在二进制时自动安装后运行：
 
 ```bash
-./instal.sh run --repo OWNER/REPOSITORY start
+./install.sh run --repo OWNER/REPOSITORY start
 ```
 
 ## 开机启动
