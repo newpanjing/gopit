@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -125,6 +126,12 @@ func SaveClientConfig(path string, cfg *ClientConfig) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
+	}
+	directory := filepath.Dir(path)
+	if directory != "." {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(path, data, 0600)
 }

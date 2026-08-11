@@ -72,7 +72,7 @@ const usage = `GoPit - 隧道代理工具
 	join     选择客户端模式并写入 pit.yaml，支持多个 Token 隧道。
 	         -s 只传主机时自动使用服务端默认端口 7001。
 	         -s 未指定时从已有配置文件读取。
-	         配置自动保存到 -c 指定的路径（默认 client.yaml）。
+	         配置自动保存到 ~/.gopit/client.yaml；-c 可指定独立配置。
 	         使用 --foreground 可在当前终端查看彩色日志。
 
 	startup  enable 后开机时自动按 pit.yaml 恢复当前模式。
@@ -82,14 +82,15 @@ const usage = `GoPit - 隧道代理工具
 	log      查看指定日志文件，<name> 为文件名（不含 .log 后缀）。`
 
 const (
-	commandName             = "pit"
-	defaultServerConfigPath = "server.yaml"
-	defaultClientConfigPath = "client.yaml"
-	defaultStatePath        = "pit.yaml"
-	defaultTunnelPort       = "7001"
-	daemonFlag              = "--daemon"
-	processStartWait        = 2 * time.Second
-	processStopWait         = 5 * time.Second
+	commandName           = "pit"
+	serverConfigFileName  = "server.yaml"
+	clientConfigFileName  = "client.yaml"
+	runtimeStateFileName  = "pit.yaml"
+	userDataDirectoryName = ".gopit"
+	defaultTunnelPort     = "7001"
+	daemonFlag            = "--daemon"
+	processStartWait      = 2 * time.Second
+	processStopWait       = 5 * time.Second
 )
 
 var version = "dev"
@@ -138,7 +139,7 @@ func main() {
 // --- start: 启动服务端 --------------------------------------------------
 
 func cmdStart(args []string) {
-	configPath := defaultServerConfigPath
+	configPath := defaultServerConfigPath()
 	daemon := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -150,12 +151,12 @@ func cmdStart(args []string) {
 		case daemonFlag:
 			daemon = true
 		case "-h", "--help":
-			fmt.Println("用法: pit start [-c server.yaml]")
+			fmt.Println("用法: pit start [-c config.yaml]")
 			return
 		}
 	}
 	if isClientRunning(clientConfigPathFor(configPath)) {
-		fmt.Fprintln(os.Stderr, "启动失败: 客户端 join 模式正在运行，请先执行 pit stop -c client.yaml")
+		fmt.Fprintln(os.Stderr, "启动失败: 客户端 join 模式正在运行，请先执行 pit stop")
 		os.Exit(1)
 	}
 	if err := saveRuntimeState(runtime.ModeServer, configPath); err != nil {
@@ -399,7 +400,7 @@ func runClient(configPath string, daemon bool) {
 }
 
 func parseConfigPath(args []string) string {
-	configPath := defaultServerConfigPath
+	configPath := defaultServerConfigPath()
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-c" || args[i] == "-config" {
 			if i+1 < len(args) {
@@ -476,7 +477,7 @@ func readPID(configPath string) (int, error) {
 
 func cmdStop(args []string) {
 	if hasHelpFlag(args) {
-		fmt.Println("用法: pit stop [-c server.yaml]")
+		fmt.Println("用法: pit stop [-c config.yaml]")
 		return
 	}
 	configPath := parseConfigPath(args)
@@ -485,8 +486,8 @@ func cmdStop(args []string) {
 			configPath = state.ConfigPath
 		}
 	}
-	if !isProcessRunning(configPath) && configPath == defaultServerConfigPath && isClientRunning(defaultClientConfigPath) {
-		configPath = defaultClientConfigPath
+	if !isProcessRunning(configPath) && configPath == defaultServerConfigPath() && isClientRunning(defaultClientConfigPath()) {
+		configPath = defaultClientConfigPath()
 	}
 
 	if err := stopByPID(configPath); err != nil {
@@ -500,7 +501,7 @@ func cmdStop(args []string) {
 
 func cmdRestart(args []string) {
 	if hasHelpFlag(args) {
-		fmt.Println("用法: pit restart [-c server.yaml]")
+		fmt.Println("用法: pit restart [-c config.yaml]")
 		return
 	}
 	configPath := parseConfigPath(args)
@@ -791,12 +792,12 @@ func stopByPID(configPath string) error {
 
 func cmdJoin(args []string) {
 	if hasHelpFlag(args) {
-		fmt.Println("用法: pit join <token> [-s host[:port]] [-c client.yaml] [--foreground]\n       pit join --run [-c client.yaml]")
+		fmt.Println("用法: pit join <token> [-s host[:port]] [-c config.yaml] [--foreground]\n       pit join --run [-c config.yaml]")
 		return
 	}
 	token := ""
 	serverAddr := ""
-	configPath := defaultClientConfigPath
+	configPath := defaultClientConfigPath()
 	foreground := false
 	runOnly := false
 	for i := 0; i < len(args); i++ {
@@ -822,12 +823,12 @@ func cmdJoin(args []string) {
 		}
 	}
 	if isServerRunning(serverConfigPathFor(configPath)) {
-		fmt.Fprintln(os.Stderr, "加入失败: 服务端 start 模式正在运行，请先执行 pit stop -c server.yaml")
+		fmt.Fprintln(os.Stderr, "加入失败: 服务端 start 模式正在运行，请先执行 pit stop")
 		os.Exit(1)
 	}
 	if isClientRunning(configPath) && !foreground {
 		pid, _ := readPID(configPath)
-		fmt.Fprintf(os.Stderr, "客户端已运行 (PID %d)，使用 pit tui -c %s 管理\n", pid, configPath)
+		fmt.Fprintf(os.Stderr, "客户端已运行 (PID %d)，使用 pit tui 管理\n", pid)
 		os.Exit(1)
 	}
 	if runOnly {
@@ -840,7 +841,7 @@ func cmdJoin(args []string) {
 		return
 	}
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "用法: pit join <token> [-s host[:port]] [-c client.yaml]")
+		fmt.Fprintln(os.Stderr, "用法: pit join <token> [-s host[:port]] [-c config.yaml]")
 		os.Exit(1)
 	}
 
@@ -990,11 +991,68 @@ func newClientTunnelID() (string, error) {
 	return "client-" + hex.EncodeToString(data), nil
 }
 
+// defaultServerConfigPath 返回用户级服务端配置路径，并兼容旧版用户目录配置文件。
+func defaultServerConfigPath() string {
+	path := userDataPath(serverConfigFileName)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacyPath := legacyUserPath(serverConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
+// defaultClientConfigPath 返回用户级客户端配置路径，并兼容旧版用户目录配置文件。
+func defaultClientConfigPath() string {
+	path := userDataPath(clientConfigFileName)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacyPath := legacyUserPath(clientConfigFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
+// runtimeStatePath 返回用户级运行状态路径，并兼容当前目录的旧版状态文件。
+func runtimeStatePath() string {
+	path := userDataPath(runtimeStateFileName)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	legacyPath := legacyUserPath(runtimeStateFileName)
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return path
+}
+
+// userDataPath 构建当前用户的 GoPit 专用数据目录路径。
+func userDataPath(fileName string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fileName
+	}
+	return filepath.Join(home, userDataDirectoryName, fileName)
+}
+
+// legacyUserPath 返回旧版本保存在用户主目录根下的兼容文件路径。
+func legacyUserPath(fileName string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fileName
+	}
+	return filepath.Join(home, fileName)
+}
+
 func clientConfigPathFor(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), defaultClientConfigPath)
+	return defaultClientConfigPath()
 }
 func serverConfigPathFor(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), defaultServerConfigPath)
+	return defaultServerConfigPath()
 }
 
 // normalizeServerAddress 为未指定端口的服务端主机补充默认隧道端口。
@@ -1106,10 +1164,10 @@ func saveRuntimeState(mode, configPath string) error {
 	if err != nil {
 		return err
 	}
-	return runtime.Save(defaultStatePath, runtime.State{Mode: mode, ConfigPath: absPath})
+	return runtime.Save(runtimeStatePath(), runtime.State{Mode: mode, ConfigPath: absPath})
 }
 
-func loadRuntimeState() (*runtime.State, error) { return runtime.Load(defaultStatePath) }
+func loadRuntimeState() (*runtime.State, error) { return runtime.Load(runtimeStatePath()) }
 
 func mustCurrentDirectory() string {
 	directory, err := os.Getwd()
@@ -1127,7 +1185,7 @@ func plistString(value string) string {
 
 func cmdLogs(args []string) {
 	if hasHelpFlag(args) {
-		fmt.Println("用法: pit logs [-c server.yaml]")
+		fmt.Println("用法: pit logs [-c config.yaml]")
 		return
 	}
 	configPath := parseConfigPath(args)

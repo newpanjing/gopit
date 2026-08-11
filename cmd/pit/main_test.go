@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 // TestCompareVersions 验证升级版本仅在远端版本更高时才判定可升级。
 func TestCompareVersions(t *testing.T) {
@@ -30,5 +33,25 @@ func TestCompareVersions(t *testing.T) {
 func TestFormatDownloadBytes(t *testing.T) {
 	if value := formatDownloadBytes(1024); value != "1.0KB" {
 		t.Fatalf("formatDownloadBytes(1024) = %q, want 1.0KB", value)
+	}
+}
+
+// TestDefaultClientConfigPath 验证新客户端默认使用用户目录中的专属配置文件。
+func TestDefaultClientConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, userDataDirectoryName, clientConfigFileName)
+	if got := defaultClientConfigPath(); got != want {
+		t.Fatalf("defaultClientConfigPath() = %q, want %q", got, want)
+	}
+}
+
+// TestDefaultServerConfigPath 验证新服务端默认使用用户目录中的专属配置文件。
+func TestDefaultServerConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	want := filepath.Join(home, userDataDirectoryName, serverConfigFileName)
+	if got := defaultServerConfigPath(); got != want {
+		t.Fatalf("defaultServerConfigPath() = %q, want %q", got, want)
 	}
 }

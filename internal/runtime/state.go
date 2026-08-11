@@ -4,6 +4,7 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,11 +39,17 @@ func Load(path string) (*State, error) {
 	return &state, nil
 }
 
-// Save 原子性要求由调用方所在目录保证；文件权限限制为当前用户可读写。
+// Save 确保状态目录存在，并以当前用户可读写权限持久化运行状态。
 func Save(path string, state State) error {
 	data, err := yaml.Marshal(state)
 	if err != nil {
 		return err
+	}
+	directory := filepath.Dir(path)
+	if directory != "." {
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(path, data, 0600)
 }
