@@ -65,4 +65,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "${TAG}" release-assets/* --title "${TAG}" --generate-notes
+        run: |
+          set -eu
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --title "${TAG}" --generate-notes
+          fi
+          find release-assets -type f -print0 | while IFS= read -r -d '' asset; do
+            gh release upload "${TAG}" "${asset}" --clobber
+          done
