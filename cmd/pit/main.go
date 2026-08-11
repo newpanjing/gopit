@@ -707,7 +707,7 @@ func cmdUpgrade(args []string) {
 
 const upgradeDownloadAttempts = 3
 
-// downloadReleaseAsset 下载 Release 资产，遇到连接提前结束时重新请求并续传到新的完整文件。
+// downloadReleaseAsset 下载 Release 资产，遇到连接提前结束时重新请求完整文件。
 func downloadReleaseAsset(url, path string) error {
 	var lastErr error
 	for attempt := 1; attempt <= upgradeDownloadAttempts; attempt++ {
@@ -752,7 +752,62 @@ func downloadReleaseAsset(url, path string) error {
 			lastErr = io.ErrUnexpectedEOF
 		}
 	}
-	return fmt.Errorf("after %d attempts: %w", upgradeDownloadAttempts, lastErr)
+	if err := downloadReleaseAssetWithCurl(url, path); err == nil {
+		return nil
+	} else if lastErr != nil {
+		return fmt.Errorf("after %d attempts: %v; external downloader: %w", upgradeDownloadAttempts, lastErr, err)
+	} else {
+		return err
+	}
+}
+
+// downloadReleaseAssetWithCurl 使用系统下载工具回退处理 Go TLS/代理连接失败。
+func downloadReleaseAssetWithCurl(url, path string) error {
+	var curlErr error
+	if curl, err := exec.LookPath("curl"); err == nil {
+		fmt.Println("Go 下载连接失败，切换 curl 重试...")
+		command := exec.Command(curl, "--ipv4", "--fail", "--location", "--progress-bar", "--retry", "5", "--retry-delay", "2", "--connect-timeout", "20", "--max-time", "300", "--output", path, url)
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Run(); err == nil {
+			if err := ensureDownloadedFile(path); err == nil {
+				return nil
+			} else {
+				curlErr = err
+			}
+		} else {
+			curlErr = err
+		}
+	}
+	if wget, err := exec.LookPath("wget"); err == nil {
+		fmt.Println("Go 下载连接失败，切换 wget 重试...")
+		command := exec.Command(wget, "--inet4-only", "--timeout=20", "--tries=5", "--show-progress", "--output-document", path, url)
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Run(); err == nil {
+			if err := ensureDownloadedFile(path); err == nil {
+				return nil
+			}
+			return err
+		}
+		return err
+	}
+	if curlErr != nil {
+		return curlErr
+	}
+	return fmt.Errorf("未找到 curl 或 wget")
+}
+
+// ensureDownloadedFile 确保外部下载器没有生成空文件。
+func ensureDownloadedFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("下载文件为空")
+	}
+	return nil
 }
 
 const (
