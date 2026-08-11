@@ -46,9 +46,12 @@ download_and_install() {
   local url="https://github.com/${REPOSITORY}/releases/latest/download/${asset}"
   local temporary_dir
   temporary_dir="$(mktemp -d)"
-  trap 'rm -rf "${temporary_dir}"' EXIT
+  # 将临时目录值在注册 trap 时展开，避免函数返回后局部变量触发 set -u。
+  trap "rm -rf -- '${temporary_dir}'" EXIT
   printf 'Downloading %s\n' "${url}"
-  curl --fail --location --silent --show-error "${url}" -o "${temporary_dir}/${binary}"
+  curl --ipv4 --fail --location --silent --show-error \
+    --connect-timeout 20 --max-time 300 --retry 5 --retry-delay 2 \
+    "${url}" -o "${temporary_dir}/${binary}"
   [[ -f "${temporary_dir}/${binary}" ]] || fail "release asset download failed"
   mkdir -p "${INSTALL_DIR}"
   cp "${temporary_dir}/${binary}" "${INSTALL_DIR}/${binary}"
