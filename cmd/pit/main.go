@@ -555,8 +555,10 @@ func cmdStop(args []string) {
 	}
 	configPath := parseConfigPath(args)
 	if len(args) == 0 {
-		if state, err := loadRuntimeState(); err == nil {
+		if state, err := loadRuntimeState(); err == nil && isProcessRunning(state.ConfigPath) {
 			configPath = state.ConfigPath
+		} else if _, path, found := findRunningInstance(); found {
+			configPath = path
 		}
 	}
 	if !isProcessRunning(configPath) && configPath == defaultServerConfigPath() && isClientRunning(defaultClientConfigPath()) {
@@ -579,19 +581,12 @@ func cmdRestart(args []string) {
 	}
 	configPath := parseConfigPath(args)
 	if len(args) == 0 {
-		if state, err := loadRuntimeState(); err == nil {
-			if err := stopByPID(state.ConfigPath); err == nil {
-				fmt.Println("已停止旧实例")
-			}
-			if state.Mode == runtime.ModeServer {
-				// TUI 切换模式后，状态文件指向新模式；同时清理可能仍在运行的客户端。
-				_ = stopByPID(clientConfigPathFor(state.ConfigPath))
-				cmdStart([]string{"-c", state.ConfigPath})
-			} else {
-				// 客户端模式同理，先停止同目录下的服务端实例。
-				_ = stopByPID(serverConfigPathFor(state.ConfigPath))
-				startClientDaemon(state.ConfigPath)
-			}
+		if mode, path, found := findRunningInstance(); found {
+			restartInstance(mode, path)
+			return
+		}
+		if state, err := loadRuntimeState(); err == nil && configFileExists(state.ConfigPath) {
+			restartInstance(state.Mode, state.ConfigPath)
 			return
 		}
 	}
@@ -605,6 +600,47 @@ func cmdRestart(args []string) {
 
 	// 重新启动
 	cmdStart(args)
+}
+
+// restartInstance 停止并按原始模式及配置路径重启后台实例。
+func restartInstance(mode, configPath string) {
+	if err := stopByPID(configPath); err == nil {
+		fmt.Println("已停止旧实例")
+	}
+	if mode == runtime.ModeClient {
+		_ = stopByPID(serverConfigPathFor(configPath))
+		startClientDaemon(configPath)
+		return
+	}
+	_ = stopByPID(clientConfigPathFor(configPath))
+	cmdStart([]string{"-c", configPath})
+}
+
+// findRunningInstance 按用户级和旧版路径探测真实运行的后台实例。
+func findRunningInstance() (string, string, bool) {
+	type candidate struct {
+		mode string
+		path string
+	}
+	candidates := []candidate{
+		{mode: runtime.ModeServer, path: userDataPath(serverConfigFileName)},
+		{mode: runtime.ModeClient, path: userDataPath(clientConfigFileName)},
+		{mode: runtime.ModeServer, path: legacyUserPath(serverConfigFileName)},
+		{mode: runtime.ModeClient, path: legacyUserPath(clientConfigFileName)},
+		{mode: runtime.ModeServer, path: filepath.Join(mustCurrentDirectory(), serverConfigFileName)},
+		{mode: runtime.ModeClient, path: filepath.Join(mustCurrentDirectory(), clientConfigFileName)},
+	}
+	seen := make(map[string]bool, len(candidates))
+	for _, item := range candidates {
+		if seen[item.path] {
+			continue
+		}
+		seen[item.path] = true
+		if isProcessRunning(item.path) {
+			return item.mode, item.path, true
+		}
+	}
+	return "", "", false
 }
 
 // cmdUpgrade 从 GitHub 下载当前平台的最新 pit 可执行文件并原子替换本地程序。
