@@ -70,6 +70,15 @@ download_and_install() {
   chmod 0755 "${INSTALL_DIR}/${binary}"
   printf 'Installed %s to %s\n' "${PROGRAM_NAME}" "${INSTALL_DIR}/${binary}"
   add_path
+
+  printf '\n安装成功！GoPit 已可在当前终端直接使用。\n'
+  "${INSTALL_DIR}/${binary}" --version 2>/dev/null || true
+  if [[ "${COMMAND}" == "upgrade" ]]; then
+    printf '\n升级完成。重新打开管理界面：\n\n  pit tui\n\n'
+    return
+  fi
+  printf '\n第一步：打开管理界面并选择运行模式：\n\n  pit tui\n\n'
+  printf '首次运行可选择服务端或客户端；配置会自动保存到 ~/.gopit/。\n'
 }
 
 add_path() {
