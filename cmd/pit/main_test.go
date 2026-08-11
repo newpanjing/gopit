@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,5 +94,35 @@ func TestEnsureClientConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("client config was not created: %v", err)
+	}
+}
+
+// TestDownloadReleaseAssetRetries 验证升级下载遇到截断响应时会重新请求完整文件。
+func TestDownloadReleaseAssetRetries(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			writer.Header().Set("Content-Length", "6")
+			_, _ = writer.Write([]byte("bad"))
+			return
+		}
+		_, _ = writer.Write([]byte("complete"))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "pit")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatalf("create temporary asset file: %v", err)
+	}
+	if err := downloadReleaseAsset(server.URL, path); err != nil {
+		t.Fatalf("downloadReleaseAsset() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read downloaded asset: %v", err)
+	}
+	if string(data) != "complete" || attempts != 2 {
+		t.Fatalf("downloaded data = %q, attempts = %d; want complete after 2 attempts", data, attempts)
 	}
 }

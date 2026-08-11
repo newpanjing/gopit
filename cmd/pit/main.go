@@ -677,23 +677,7 @@ func cmdUpgrade(args []string) {
 		asset += ".exe"
 	}
 	url := "https://github.com/newpanjing/gopit/releases/download/" + latestVersion + "/" + asset
-	request, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "创建下载请求失败: %v\n", err)
-		os.Exit(1)
-	}
-	request.Header.Set("User-Agent", "gopit-upgrade")
 	fmt.Printf("正在下载 %s...\n", asset)
-	response, err := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "下载升级文件失败: %v\n", err)
-		os.Exit(1)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "下载升级文件失败: HTTP %s\n", response.Status)
-		os.Exit(1)
-	}
 	temporary, err := os.CreateTemp(filepath.Dir(executable), ".pit-upgrade-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "创建升级临时文件失败: %v\n", err)
@@ -701,14 +685,12 @@ func cmdUpgrade(args []string) {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	progress := &downloadProgress{total: response.ContentLength}
-	if _, err := io.Copy(temporary, io.TeeReader(response.Body, progress)); err != nil {
-		temporary.Close()
-		fmt.Fprintf(os.Stderr, "写入升级文件失败: %v\n", err)
-		os.Exit(1)
-	}
 	if err := temporary.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "关闭升级文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	if err := downloadReleaseAsset(url, temporaryPath); err != nil {
+		fmt.Fprintf(os.Stderr, "下载升级文件失败: %v\n", err)
 		os.Exit(1)
 	}
 	if err := os.Chmod(temporaryPath, 0755); err != nil {
@@ -719,9 +701,58 @@ func cmdUpgrade(args []string) {
 		fmt.Fprintf(os.Stderr, "替换当前程序失败: %v\n请手动下载: %s\n", err, url)
 		os.Exit(1)
 	}
-	progress.finish()
 	fmt.Printf("升级完成: %s -> %s\n", version, latestVersion)
 	restartAfterUpgrade()
+}
+
+const upgradeDownloadAttempts = 3
+
+// downloadReleaseAsset 下载 Release 资产，遇到连接提前结束时重新请求并续传到新的完整文件。
+func downloadReleaseAsset(url, path string) error {
+	var lastErr error
+	for attempt := 1; attempt <= upgradeDownloadAttempts; attempt++ {
+		if attempt > 1 {
+			fmt.Printf("下载中断，正在重试 (%d/%d)...\n", attempt, upgradeDownloadAttempts)
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
+			return err
+		}
+		request, requestErr := http.NewRequest(http.MethodGet, url, nil)
+		if requestErr != nil {
+			file.Close()
+			return requestErr
+		}
+		request.Header.Set("User-Agent", "gopit-upgrade")
+		response, responseErr := (&http.Client{Timeout: 5 * time.Minute}).Do(request)
+		if responseErr != nil {
+			file.Close()
+			lastErr = responseErr
+			continue
+		}
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			file.Close()
+			return fmt.Errorf("HTTP %s", response.Status)
+		}
+		progress := &downloadProgress{total: response.ContentLength}
+		_, copyErr := io.Copy(file, io.TeeReader(response.Body, progress))
+		response.Body.Close()
+		closeErr := file.Close()
+		if copyErr == nil && closeErr == nil && (response.ContentLength <= 0 || progress.written == response.ContentLength) {
+			progress.finish()
+			return nil
+		}
+		progress.fail()
+		if copyErr != nil {
+			lastErr = copyErr
+		} else if closeErr != nil {
+			lastErr = closeErr
+		} else {
+			lastErr = io.ErrUnexpectedEOF
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", upgradeDownloadAttempts, lastErr)
 }
 
 const (
@@ -763,6 +794,9 @@ func (p *downloadProgress) finish() {
 	}
 	fmt.Println()
 }
+
+// fail 结束失败的单行进度输出，避免后续错误信息与进度粘连。
+func (p *downloadProgress) fail() { fmt.Println() }
 
 // formatDownloadBytes 将下载字节数格式化为终端进度中使用的紧凑单位。
 func formatDownloadBytes(value int64) string {
@@ -898,7 +932,7 @@ func restartAfterUpgrade() {
 		return
 	}
 	fmt.Println("正在重启后台实例以应用新版本...")
-	cmdRestart([]string{"-c", state.ConfigPath})
+	restartInstance(state.Mode, state.ConfigPath)
 	fmt.Println("后台实例已使用新版本重启。")
 }
 
