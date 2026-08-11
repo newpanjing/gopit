@@ -5,12 +5,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +45,7 @@ const usage = `GoPit - 隧道代理工具
 	tui                               打开当前模式的管理界面
 	stop                              停止当前模式
 	restart                           重启当前模式
+	upgrade                           在线升级到最新版本
 	startup enable|disable            开启或关闭开机启动
 	logs                              持续查看当前模式日志
 	log  <name> [-d logs/]             查看指定日志文件
@@ -106,6 +110,8 @@ func main() {
 		cmdStop(args)
 	case "restart":
 		cmdRestart(args)
+	case "upgrade":
+		cmdUpgrade(args)
 	case "join":
 		cmdJoin(args)
 	case "startup":
@@ -519,6 +525,63 @@ func cmdRestart(args []string) {
 
 	// 重新启动
 	cmdStart(args)
+}
+
+// cmdUpgrade 从 GitHub 下载当前平台的最新 pit 可执行文件并原子替换本地程序。
+func cmdUpgrade(args []string) {
+	if hasHelpFlag(args) {
+		fmt.Println("用法: pit upgrade")
+		return
+	}
+	if len(args) > 0 {
+		fmt.Fprintln(os.Stderr, "用法: pit upgrade")
+		os.Exit(1)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "定位当前程序失败: %v\n", err)
+		os.Exit(1)
+	}
+	asset := fmt.Sprintf("pit_%s_%s", goruntime.GOOS, goruntime.GOARCH)
+	if goruntime.GOOS == "windows" {
+		asset += ".exe"
+	}
+	url := "https://github.com/newpanjing/gopit/releases/latest/download/" + asset
+	response, err := http.Get(url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "下载升级文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "下载升级文件失败: HTTP %s\n", response.Status)
+		os.Exit(1)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(executable), ".pit-upgrade-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "创建升级临时文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := io.Copy(temporary, response.Body); err != nil {
+		temporary.Close()
+		fmt.Fprintf(os.Stderr, "写入升级文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	if err := temporary.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "关闭升级文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Chmod(temporaryPath, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "设置升级文件权限失败: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Rename(temporaryPath, executable); err != nil {
+		fmt.Fprintf(os.Stderr, "替换当前程序失败: %v\n请手动下载: %s\n", err, url)
+		os.Exit(1)
+	}
+	fmt.Printf("升级完成: %s\n", asset)
 }
 
 // --- PID 文件管理 -------------------------------------------------------

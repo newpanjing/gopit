@@ -5,38 +5,22 @@ set -euo pipefail
 PROGRAM_NAME="pit"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 COMMAND="install"
-REPOSITORY="${GOPIT_REPOSITORY:-}"
-INSTALL_DIR="${GOPIT_INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
-VERSION="latest"
+REPOSITORY="newpanjing/gopit"
+INSTALL_DIR="${DEFAULT_INSTALL_DIR}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh install [--repo owner/repo] [--dir path] [--version tag]
-  install.sh upgrade [--repo owner/repo] [--dir path] [--version tag]
-  install.sh run [--repo owner/repo] [--dir path] [pit arguments...]
+  install.sh
+  install.sh upgrade
 
-The repository is resolved from --repo, GOPIT_REPOSITORY, or the current Git
-remote. For a curl download, set GOPIT_REPOSITORY=owner/repo.
+Downloads the latest executable from github.com/newpanjing/gopit.
 EOF
 }
 
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
-
-detect_repository() {
-  if [[ -n "${REPOSITORY}" ]]; then return; fi
-  if command -v git >/dev/null 2>&1; then
-    local remote
-    remote="$(git config --get remote.origin.url 2>/dev/null || true)"
-    remote="${remote#git@github.com:}"
-    remote="${remote#https://github.com/}"
-    remote="${remote%.git}"
-    if [[ "${remote}" == */* ]]; then REPOSITORY="${remote}"; fi
-  fi
-  [[ -n "${REPOSITORY}" ]] || fail "set --repo owner/repo or GOPIT_REPOSITORY"
-}
 
 detect_platform() {
   case "$(uname -s)" in
@@ -60,9 +44,7 @@ download_and_install() {
   if [[ "${OS}" == "windows" ]]; then binary="${PROGRAM_NAME}.exe"; fi
   local asset="${PROGRAM_NAME}_${OS}_${ARCH}"
   if [[ "${OS}" == "windows" ]]; then asset="${asset}.exe"; fi
-  local release_path="latest/download"
-  if [[ "${VERSION}" != "latest" ]]; then release_path="download/${VERSION}"; fi
-  local url="https://github.com/${REPOSITORY}/releases/${release_path}/${asset}"
+  local url="https://github.com/${REPOSITORY}/releases/latest/download/${asset}"
   local temporary_dir
   temporary_dir="$(mktemp -d)"
   trap 'rm -rf "${temporary_dir}"' EXIT
@@ -73,29 +55,24 @@ download_and_install() {
   cp "${temporary_dir}/${binary}" "${INSTALL_DIR}/${binary}"
   chmod 0755 "${INSTALL_DIR}/${binary}"
   printf 'Installed %s to %s\n' "${PROGRAM_NAME}" "${INSTALL_DIR}/${binary}"
-  case ":${PATH}:" in
-    *":${INSTALL_DIR}:"*) ;;
-    *) printf 'Add %s to PATH to invoke %s directly.\n' "${INSTALL_DIR}" "${PROGRAM_NAME}" ;;
-  esac
+  add_path
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    install|upgrade|run) COMMAND="$1"; shift ;;
-    --repo) REPOSITORY="${2:-}"; shift 2 ;;
-    --dir) INSTALL_DIR="${2:-}"; shift 2 ;;
-    --version) VERSION="${2:-}"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) break ;;
-  esac
-done
+add_path() {
+  local profile="${HOME}/.bashrc"
+  if [[ "$(uname -s)" == "Darwin" ]]; then profile="${HOME}/.zshrc"; fi
+  local marker="# GoPit PATH"
+  if [[ ! -f "${profile}" ]] || ! grep -Fq "${marker}" "${profile}"; then
+    printf '\n%s\nexport PATH="%s:$PATH"\n' "${marker}" "${INSTALL_DIR}" >> "${profile}"
+  fi
+  export PATH="${INSTALL_DIR}:${PATH}"
+  printf 'PATH updated for this shell and %s\n' "${profile}"
+}
+
+if [[ "${1:-}" == "upgrade" ]]; then COMMAND="upgrade"; shift; fi
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then usage; exit 0; fi
+[[ $# -eq 0 ]] || fail "usage: install.sh [upgrade]"
 
 case "${COMMAND}" in
   install|upgrade) download_and_install ;;
-  run)
-    run_binary="${PROGRAM_NAME}"
-    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then run_binary="${PROGRAM_NAME}.exe"; fi
-    if [[ ! -x "${INSTALL_DIR}/${run_binary}" ]]; then download_and_install; fi
-    exec "${INSTALL_DIR}/${run_binary}" "$@"
-    ;;
 esac

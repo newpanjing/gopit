@@ -1,79 +1,76 @@
 # GoPit
 
-`pit` 是一个支持服务端与客户端模式的隧道管理工具。执行 `pit start` 进入服务端模式，执行 `pit join` 进入客户端模式；当前模式会保存到 `pit.yaml`，后续 `tui`、`restart` 与开机启动会自动恢复该模式。
+## 用途
 
-## 安装
+GoPit 用于在服务端与内网客户端之间建立隧道，支持服务端统一管理 HTTP、TCP、UDP 连接，以及客户端多隧道连接、状态查看和后台运行。
 
-发布版本为每个 macOS、Linux、Windows 的 `amd64`、`arm64` 架构提供单独可下载的可执行文件。`install.sh` 会自动识别系统和架构，下载最新匹配版本到 `~/.local/bin`。
+## 安装说明
 
-在源码目录内执行时，脚本会尝试从 Git remote 读取仓库地址：
+macOS、Linux 和 Windows 的 `amd64`、`arm64` 可执行文件会发布到 GitHub Release。安装脚本会自动判断当前系统和架构：
 
 ```bash
-./install.sh install
+curl -fsSL https://raw.githubusercontent.com/newpanjing/gopit/main/install.sh | bash
 ```
 
-通过 curl 下载脚本或当前目录没有 Git remote 时，指定 GitHub 仓库：
+安装后重新打开终端即可使用 `pit`。升级当前版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/install.sh | bash -s -- install --repo OWNER/REPOSITORY
+pit upgrade
 ```
 
-也可使用环境变量：
+也可以直接运行本地脚本：
 
 ```bash
-GOPIT_REPOSITORY=OWNER/REPOSITORY ./install.sh install
+./install.sh
+./install.sh upgrade
 ```
 
-首次安装后，确保 `~/.local/bin` 在 `PATH` 中：
+## 简介
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+pit start                 # 后台启动服务端模式
+pit join <token> -s host  # 后台启动客户端模式
+pit tui                   # 打开当前模式界面
+pit stop                  # 停止当前模式
+pit restart               # 重启当前模式
+pit logs                  # 查看当前模式日志
 ```
 
-## 升级
+`start` 和 `join` 会将当前模式保存到 `pit.yaml`。服务端 TUI 与客户端 TUI 独立显示；TUI 中按 `m` 可选择下次启动的模式。
 
-升级会下载最新 Release 并替换本地二进制：
+## 服务端配置
 
-```bash
-./install.sh upgrade --repo OWNER/REPOSITORY
-```
-
-安装指定版本：
+服务端配置默认为 `server.yaml`，可从示例复制：
 
 ```bash
-./install.sh install --repo OWNER/REPOSITORY --version v1.0.0
-```
-
-## 运行
-
-安装后可直接使用：
-
-```bash
+cp configs/server.example.yaml server.yaml
 pit start
 pit tui
-pit join <token> -s <server>
 ```
 
-也可以让脚本在本地不存在二进制时自动安装后运行：
+主要配置：
 
-```bash
-./install.sh run --repo OWNER/REPOSITORY start
+```yaml
+server:
+  tunnel_listen: ":7001"
+  http_listen: ":80"
+  https_listen: ":443"
+connections: []
 ```
 
-## 开机启动
+服务端 TUI 可以创建和编辑 HTTP、TCP、UDP 隧道、Token 和目标地址。配置修改会持久化并即时通知在线客户端。
 
-先通过 `start` 或 `join` 选择并保存运行模式，再开启自动恢复：
+## 客户端配置
+
+推荐直接使用 Token 加入：
 
 ```bash
-pit startup enable
-pit startup disable
+pit join <token> -s 192.168.1.188
 ```
 
-## 发布版本
-
-推送形如 `v1.0.0` 的 Git 标签会触发 GitHub Actions，自动构建 macOS/Linux 多架构压缩包并创建 GitHub Release：
+客户端配置默认为 `client.yaml`，支持保存多个隧道。客户端后台状态可通过以下命令查看：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+pit tui
+pit stop
 ```
