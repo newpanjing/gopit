@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gopit/internal/runtime"
 )
 
 // TestCompareVersions 验证升级版本仅在远端版本更高时才判定可升级。
@@ -64,5 +69,28 @@ func TestReleaseTagFromPath(t *testing.T) {
 	}
 	if _, ok := releaseTagFromPath("/newpanjing/gopit/releases/latest"); ok {
 		t.Fatal("latest redirect path unexpectedly parsed as a release tag")
+	}
+}
+
+// TestSelectTUIMode 验证首次进入 TUI 时可纠正无效输入并选择客户端模式。
+func TestSelectTUIMode(t *testing.T) {
+	var output bytes.Buffer
+	mode, err := selectTUIMode(strings.NewReader("x\n2\n"), &output)
+	if err != nil {
+		t.Fatalf("selectTUIMode() error = %v", err)
+	}
+	if mode != runtime.ModeClient {
+		t.Fatalf("selectTUIMode() = %q, want %q", mode, runtime.ModeClient)
+	}
+}
+
+// TestEnsureClientConfig 验证首次选择客户端模式时会创建用户级配置目录和文件。
+func TestEnsureClientConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), userDataDirectoryName, clientConfigFileName)
+	if err := ensureClientConfig(path); err != nil {
+		t.Fatalf("ensureClientConfig() error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("client config was not created: %v", err)
 	}
 }

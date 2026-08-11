@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -185,7 +186,7 @@ func cmdStart(args []string) {
 func cmdTUI(args []string) {
 	if len(args) == 0 {
 		state, err := loadRuntimeState()
-		if err == nil {
+		if err == nil && configFileExists(state.ConfigPath) {
 			switch state.Mode {
 			case runtime.ModeClient:
 				if !isClientRunning(state.ConfigPath) {
@@ -202,6 +203,8 @@ func cmdTUI(args []string) {
 				return
 			}
 		}
+		startSelectedTUI()
+		return
 	}
 	configPath := parseConfigPath(args)
 	if isClientConfig(configPath) && isClientRunning(configPath) {
@@ -219,6 +222,60 @@ func cmdTUI(args []string) {
 	}
 	ensureServerConfig(configPath)
 	runServer(configPath, true, false)
+}
+
+// startSelectedTUI 让首次运行或失效状态的用户选择默认运行模式。
+func startSelectedTUI() {
+	mode, err := selectTUIMode(os.Stdin, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "选择运行模式失败: %v\n", err)
+		return
+	}
+	switch mode {
+	case runtime.ModeServer:
+		configPath := userDataPath(serverConfigFileName)
+		ensureServerConfig(configPath)
+		if err := saveRuntimeState(runtime.ModeServer, configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "保存服务端模式失败: %v\n", err)
+			return
+		}
+		runServer(configPath, true, false)
+	case runtime.ModeClient:
+		configPath := userDataPath(clientConfigFileName)
+		if err := ensureClientConfig(configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "创建客户端配置失败: %v\n", err)
+			return
+		}
+		if err := saveRuntimeState(runtime.ModeClient, configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "保存客户端模式失败: %v\n", err)
+			return
+		}
+		startClientDaemon(configPath)
+		runClientTUI(configPath)
+	}
+}
+
+// selectTUIMode 读取用户选择的服务端或客户端模式。
+func selectTUIMode(input io.Reader, output io.Writer) (string, error) {
+	reader := bufio.NewReader(input)
+	for {
+		fmt.Fprintln(output, "未找到有效的 GoPit 配置，请选择模式：")
+		fmt.Fprintln(output, "  1. 服务端 / Server")
+		fmt.Fprintln(output, "  2. 客户端 / Client")
+		fmt.Fprint(output, "请输入 1 或 2: ")
+		value, err := reader.ReadString('\n')
+		if err != nil && len(value) == 0 {
+			return "", err
+		}
+		switch strings.TrimSpace(value) {
+		case "1":
+			return runtime.ModeServer, nil
+		case "2":
+			return runtime.ModeClient, nil
+		default:
+			fmt.Fprintln(output, "请输入 1 或 2。")
+		}
+	}
 }
 
 // runAttachedTUI 打开已运行后台服务的配置管理界面，不重复绑定服务端端口。
@@ -428,6 +485,22 @@ func ensureServerConfig(configPath string) {
 			os.Exit(1)
 		}
 	}
+}
+
+// ensureClientConfig 在客户端默认配置不存在时创建空配置，供 TUI 后续添加隧道。
+func ensureClientConfig(configPath string) error {
+	if _, err := os.Stat(configPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return config.SaveClientConfig(configPath, &config.ClientConfig{})
+}
+
+// configFileExists 判断状态记录的配置文件是否仍可用。
+func configFileExists(configPath string) bool {
+	_, err := os.Stat(configPath)
+	return err == nil
 }
 
 func ensureNotRunning(configPath string) error {
@@ -1066,7 +1139,7 @@ func defaultClientConfigPath() string {
 
 // runtimeStatePath 返回用户级运行状态路径，并兼容当前目录的旧版状态文件。
 func runtimeStatePath() string {
-	path := userDataPath(runtimeStateFileName)
+	path := defaultRuntimeStatePath()
 	if _, err := os.Stat(path); err == nil {
 		return path
 	}
@@ -1076,6 +1149,9 @@ func runtimeStatePath() string {
 	}
 	return path
 }
+
+// defaultRuntimeStatePath 返回用于写入的用户级运行状态文件路径。
+func defaultRuntimeStatePath() string { return userDataPath(runtimeStateFileName) }
 
 // userDataPath 构建当前用户的 GoPit 专用数据目录路径。
 func userDataPath(fileName string) string {
@@ -1211,7 +1287,7 @@ func saveRuntimeState(mode, configPath string) error {
 	if err != nil {
 		return err
 	}
-	return runtime.Save(runtimeStatePath(), runtime.State{Mode: mode, ConfigPath: absPath})
+	return runtime.Save(defaultRuntimeStatePath(), runtime.State{Mode: mode, ConfigPath: absPath})
 }
 
 func loadRuntimeState() (*runtime.State, error) { return runtime.Load(runtimeStatePath()) }
