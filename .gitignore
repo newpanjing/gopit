@@ -1,0 +1,19 @@
+# Local build artifacts
+bin/
+dist/
+
+# Runtime configuration and local process state
+server.yaml
+client.yaml
+pit.yaml
+tunnel.yaml
+*.pid
+*.sock
+
+# Local logs
+*.log
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

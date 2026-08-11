@@ -1,0 +1,14 @@
+server:
+  tunnel_listen: ":7001"
+  http_listen: ":80"
+  https_listen: ":443"
+  config_version: 1
+security:
+  admin_password_hash: ""
+tls:
+  enabled: false
+  certificate_file: "./certs/server.crt"
+  private_key_file: "./certs/server.key"
+clients: []
+http_routes: []
+tcp_routes: []

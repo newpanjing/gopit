@@ -1,0 +1,4 @@
+server:
+  address: localhost:7001
+auth:
+  token: replace-with-issued-token
