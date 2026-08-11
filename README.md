@@ -4,7 +4,7 @@
 
 ## 安装
 
-发布版本支持 macOS（Intel、Apple Silicon）与 Linux（x86_64、arm64）。安装脚本会自动识别系统与架构，并下载对应的 GitHub Release 资产到 `~/.local/bin/pit`。
+发布版本支持 macOS、Linux 与 Windows 的 `amd64`、`arm64` 架构。安装脚本支持 macOS/Linux，会自动识别系统与架构并下载对应资产到 `~/.local/bin/pit`；Windows 请从 GitHub Release 下载 `pit_windows_amd64.zip` 或 `pit_windows_arm64.zip` 后解压使用。
 
 在源码目录内执行时，脚本会尝试从 Git remote 读取仓库地址：
 
