@@ -92,6 +92,10 @@ const (
 	daemonFlag            = "--daemon"
 	processStartWait      = 2 * time.Second
 	processStopWait       = 5 * time.Second
+	terminalColorReset    = "\033[0m"
+	terminalColorGreen    = "\033[1;32m"
+	terminalColorYellow   = "\033[1;33m"
+	terminalColorRed      = "\033[1;31m"
 )
 
 var version = "dev"
@@ -349,7 +353,7 @@ func startDaemon(configPath string) {
 	deadline := time.Now().Add(processStartWait)
 	for time.Now().Before(deadline) {
 		if runningPID, err := readPID(absConfig); err == nil && runningPID == pid {
-			fmt.Printf("服务端已启动，PID %d\n", pid)
+			printLifecycle(terminalColorGreen, fmt.Sprintf("✓ 服务端已启动，PID %d", pid))
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -569,7 +573,7 @@ func cmdStop(args []string) {
 		fmt.Fprintf(os.Stderr, "停止失败: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("后台实例已停止")
+	printLifecycle(terminalColorRed, "✗ 后台实例已停止")
 }
 
 // --- restart: 重启服务端 -------------------------------------------------
@@ -591,29 +595,30 @@ func cmdRestart(args []string) {
 		}
 	}
 
-	// 先尝试停止运行中的实例（忽略错误，可能未运行）
-	if err := stopByPID(configPath); err == nil {
-		fmt.Println("已停止旧实例")
-	} else {
-		fmt.Println("无运行中的实例，直接启动...")
+	mode := runtime.ModeServer
+	if isClientConfig(configPath) {
+		mode = runtime.ModeClient
 	}
-
-	// 重新启动
-	cmdStart(args)
+	restartInstance(mode, configPath)
 }
 
 // restartInstance 停止并按原始模式及配置路径重启后台实例。
 func restartInstance(mode, configPath string) {
+	printLifecycle(terminalColorYellow, "↻ 正在重启后台实例...")
 	if err := stopByPID(configPath); err == nil {
-		fmt.Println("已停止旧实例")
+		printLifecycle(terminalColorYellow, "已停止旧实例")
+	} else {
+		printLifecycle(terminalColorYellow, "未发现运行中的实例，直接启动")
 	}
 	if mode == runtime.ModeClient {
 		_ = stopByPID(serverConfigPathFor(configPath))
 		startClientDaemon(configPath)
+		printLifecycle(terminalColorYellow, "↻ 后台实例已重启")
 		return
 	}
 	_ = stopByPID(clientConfigPathFor(configPath))
 	cmdStart([]string{"-c", configPath})
+	printLifecycle(terminalColorYellow, "↻ 后台实例已重启")
 }
 
 // findRunningInstance 按用户级和旧版路径探测真实运行的后台实例。
@@ -701,7 +706,7 @@ func cmdUpgrade(args []string) {
 		fmt.Fprintf(os.Stderr, "替换当前程序失败: %v\n请手动下载: %s\n", err, url)
 		os.Exit(1)
 	}
-	fmt.Printf("升级完成: %s -> %s\n", version, latestVersion)
+	printLifecycle(terminalColorGreen, fmt.Sprintf("🎉 升级完成: %s -> %s", version, latestVersion))
 	restartAfterUpgrade()
 }
 
@@ -986,9 +991,18 @@ func restartAfterUpgrade() {
 		fmt.Println("后台实例未运行，下次执行 pit start 或 pit join 时将使用新版本。")
 		return
 	}
-	fmt.Println("正在重启后台实例以应用新版本...")
 	restartInstance(state.Mode, state.ConfigPath)
-	fmt.Println("后台实例已使用新版本重启。")
+	printLifecycle(terminalColorYellow, "↻ 后台实例已使用新版本重启")
+}
+
+// printLifecycle 输出带颜色的生命周期结果，便于在终端快速识别操作状态。
+func printLifecycle(color, message string) {
+	fmt.Println(lifecycleMessage(color, message))
+}
+
+// lifecycleMessage 构造可被测试的 ANSI 高亮生命周期提示。
+func lifecycleMessage(color, message string) string {
+	return color + message + terminalColorReset
 }
 
 // --- PID 文件管理 -------------------------------------------------------
@@ -1193,7 +1207,7 @@ func startClientDaemon(configPath string) {
 	deadline := time.Now().Add(processStartWait)
 	for time.Now().Before(deadline) {
 		if running, err := readPID(absConfig); err == nil && running == pid {
-			fmt.Printf("客户端已启动，PID %d\n", pid)
+			printLifecycle(terminalColorGreen, fmt.Sprintf("✓ 客户端已启动，PID %d", pid))
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
